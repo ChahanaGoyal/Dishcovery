@@ -1,0 +1,83 @@
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+*.egg-link
+.installed.cfg
+MANIFEST
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.python-version
+
+# ── Jupyter / IPython ────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Testing & coverage ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ── Caches ───────────────────────────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+.cache/
+*.pkl
+*.joblib
+
+# ── Secrets & environment ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# ── Data & large files ───────────────────────────────────────────────────────
+data/raw/*
+data/processed/*
+# Keep directory structure but not content
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+*.csv
+*.json
+*.parquet
+*.h5
+*.hdf5
+*.zip
+*.tar.gz
+
+# ── OS artefacts ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE / editors ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Streamlit ────────────────────────────────────────────────────────────────
+.streamlit/secrets.toml
