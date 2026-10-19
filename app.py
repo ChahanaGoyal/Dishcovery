@@ -81,25 +81,50 @@ ingredient_input = st.text_area(
     help="Enter your available ingredients separated by commas.",
 )
 
+# ── Cooking-time filter ───────────────────────────────────────────────────────
+st.markdown('<div class="section-header">⏱️ Maximum cooking time</div>', unsafe_allow_html=True)
+
+cooking_time = st.selectbox(
+    label="Cooking time",
+    options=["Any", "15 minutes", "30 minutes", "60 minutes"],
+    index=0,
+    label_visibility="collapsed",
+    help="Filter recipes by how long they take to prepare.",
+)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
 col1, col2, col3 = st.columns([2, 1, 2])
 with col2:
     find_clicked = st.button("✨ Find Recipes", use_container_width=True, type="primary")
 
 # ── Result area ───────────────────────────────────────────────────────────────
+st.divider()
+st.markdown('<div class="section-header">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
+
 if find_clicked:
     raw_ingredients = [i.strip() for i in ingredient_input.split(",") if i.strip()]
 
     if not raw_ingredients:
         st.warning("Please enter at least one ingredient before searching.")
     else:
+        time_label = cooking_time if cooking_time != "Any" else "any duration"
         st.info(
             f"**{len(raw_ingredients)} ingredient(s) detected:** "
             + ", ".join(f"`{i}`" for i in raw_ingredients)
-            + "\n\n"
+            + f"\n\n**Cooking time filter:** {time_label}\n\n"
             "🚧 The recommendation engine is coming soon! "
-            "Dataset integration is in progress.",
+            "Recipe recommendations will be added in a later development step.",
             icon="🔍",
         )
+else:
+    st.markdown(
+        "<p style='color:#9CA3AF; font-style:italic;'>"
+        "Enter your ingredients above and click <strong>Find Recipes</strong> to get started. "
+        "Recipe recommendations will be added in a later development step."
+        "</p>",
+        unsafe_allow_html=True,
+    )
 
 # ── Footer info card ──────────────────────────────────────────────────────────
 st.markdown(
