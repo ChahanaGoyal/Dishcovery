@@ -98,20 +98,36 @@ col1, col2, col3 = st.columns([2, 1, 2])
 with col2:
     find_clicked = st.button("✨ Find Recipes", use_container_width=True, type="primary")
 
+def parse_ingredients(raw_input: str) -> list[str]:
+    """Parse comma-separated ingredients, stripping whitespace, removing empty items,
+    and deduplicating while preserving original order.
+    """
+    cleaned_ingredients: list[str] = []
+    seen: set[str] = set()
+    for item in raw_input.split(","):
+        cleaned = item.strip()
+        if cleaned:
+            key = cleaned.lower()
+            if key not in seen:
+                seen.add(key)
+                cleaned_ingredients.append(cleaned)
+    return cleaned_ingredients
+
+
 # ── Result area ───────────────────────────────────────────────────────────────
 st.divider()
 st.markdown('<div class="section-header">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
 
 if find_clicked:
-    raw_ingredients = [i.strip() for i in ingredient_input.split(",") if i.strip()]
+    cleaned_ingredients = parse_ingredients(ingredient_input)
 
-    if not raw_ingredients:
+    if not cleaned_ingredients:
         st.warning("Please enter at least one ingredient before searching.")
     else:
         time_label = cooking_time if cooking_time != "Any" else "any duration"
         st.info(
-            f"**{len(raw_ingredients)} ingredient(s) detected:** "
-            + ", ".join(f"`{i}`" for i in raw_ingredients)
+            f"**Cleaned ingredients ({len(cleaned_ingredients)}):** "
+            + ", ".join(f"`{i}`" for i in cleaned_ingredients)
             + f"\n\n**Cooking time filter:** {time_label}\n\n"
             "🚧 The recommendation engine is coming soon! "
             "Recipe recommendations will be added in a later development step.",
