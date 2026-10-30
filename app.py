@@ -86,7 +86,7 @@ st.markdown('<div class="section-header">⏱️ Maximum cooking time</div>', uns
 
 cooking_time = st.selectbox(
     label="Cooking time",
-    options=["Any", "15 minutes", "30 minutes", "60 minutes"],
+    options=["Any cooking time", "Up to 15 minutes", "Up to 30 minutes", "Up to 60 minutes"],
     index=0,
     label_visibility="collapsed",
     help="Filter recipes by how long they take to prepare.",
@@ -124,7 +124,7 @@ if find_clicked:
     if not cleaned_ingredients:
         st.warning("Please enter at least one ingredient before searching.")
     else:
-        time_label = cooking_time if cooking_time != "Any" else "any duration"
+        time_label = cooking_time if cooking_time != "Any cooking time" else "any duration"
         st.info(
             f"**Cleaned ingredients ({len(cleaned_ingredients)}):** "
             + ", ".join(f"`{i}`" for i in cleaned_ingredients)
