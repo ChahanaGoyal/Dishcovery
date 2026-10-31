@@ -9,7 +9,13 @@ Run with:
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
+import pandas as pd
 import streamlit as st
+
+from src.data_loader import get_data_dir, load_csv, validate_foodcom_columns
 
 # ── Page configuration ────────────────────────────────────────────────────────
 st.set_page_config(
@@ -98,6 +104,7 @@ col1, col2, col3 = st.columns([2, 1, 2])
 with col2:
     find_clicked = st.button("✨ Find Recipes", use_container_width=True, type="primary")
 
+
 def parse_ingredients(raw_input: str) -> list[str]:
     """Parse comma-separated ingredients, stripping whitespace, removing empty items,
     and deduplicating while preserving original order.
@@ -112,6 +119,81 @@ def parse_ingredients(raw_input: str) -> list[str]:
                 seen.add(key)
                 cleaned_ingredients.append(cleaned)
     return cleaned_ingredients
+
+
+def filter_by_cooking_time(df: pd.DataFrame, max_time_option: str) -> pd.DataFrame:
+    """Filter recipes by cooking time based on the selected UI option.
+
+    Parameters
+    ----------
+    df:
+        DataFrame containing at least a 'minutes' column.
+    max_time_option:
+        One of 'Any cooking time', 'Up to 15 minutes', 'Up to 30 minutes', 'Up to 60 minutes'.
+
+    Returns
+    -------
+    pd.DataFrame
+        Filtered DataFrame.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df
+
+    if max_time_option == "Any cooking time" or "minutes" not in df.columns:
+        return df
+
+    time_limits = {
+        "Up to 15 minutes": 15,
+        "Up to 30 minutes": 30,
+        "Up to 60 minutes": 60,
+    }
+    limit = time_limits.get(max_time_option)
+    if limit is None:
+        return df
+
+    minutes_numeric = pd.to_numeric(df["minutes"], errors="coerce")
+    valid_mask = (minutes_numeric >= 0) & (minutes_numeric <= limit)
+    return df[valid_mask]
+
+
+def format_recipe_ingredients(raw: object) -> str:
+    """Format raw recipe ingredients from the dataset for display."""
+    if raw is None:
+        return "Ingredients not available"
+    if isinstance(raw, list):
+        items = [str(x).strip() for x in raw if str(x).strip()]
+        return ", ".join(items) if items else "Ingredients not available"
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = ast.literal_eval(stripped)
+                if isinstance(parsed, list):
+                    items = [str(x).strip() for x in parsed if str(x).strip()]
+                    return ", ".join(items) if items else "Ingredients not available"
+            except (ValueError, SyntaxError):
+                pass
+        return stripped if stripped else "Ingredients not available"
+    if pd.isna(raw):
+        return "Ingredients not available"
+    return str(raw)
+
+
+@st.cache_data
+def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
+    """Load the recipe dataset using the existing data loader with caching."""
+    data_path = get_data_dir("raw") / "RAW_recipes.csv"
+    if not data_path.exists():
+        return None, (
+            f"Recipe dataset not found at `{data_path}`. "
+            "Please download the Food.com `RAW_recipes.csv` and place it in `data/raw/`."
+        )
+    try:
+        df = load_csv(data_path)
+        validate_foodcom_columns(df)
+        return df, None
+    except Exception as exc:
+        return None, f"Error loading recipe dataset: {exc}"
 
 
 # ── Result area ───────────────────────────────────────────────────────────────
@@ -130,7 +212,7 @@ if find_clicked:
             + ", ".join(f"`{i}`" for i in cleaned_ingredients)
             + f"\n\n**Cooking time filter:** {time_label}\n\n"
             "🚧 The recommendation engine is coming soon! "
-            "Recipe recommendations will be added in a later development step.",
+            "Recipe recommendations based on your ingredients will be added in a later development step.",
             icon="🔍",
         )
 else:
@@ -141,6 +223,52 @@ else:
         "</p>",
         unsafe_allow_html=True,
     )
+
+# ── Recipe Catalog Sample ─────────────────────────────────────────────────────
+st.divider()
+st.markdown('<div class="section-header">🍲 Recipe Catalog Preview</div>', unsafe_allow_html=True)
+
+recipes_df, load_err = load_recipe_catalog()
+
+if load_err:
+    st.warning(load_err)
+elif recipes_df is not None and not recipes_df.empty:
+    filtered_recipes = filter_by_cooking_time(recipes_df, cooking_time)
+
+    st.caption(
+        f"Showing up to 5 sample recipes from the dataset matching: **{cooking_time}** "
+        f"({len(filtered_recipes)} matching in catalog). "
+        "These are sample entries to verify data loading; personalized recommendation ranking will be added soon."
+    )
+
+    if filtered_recipes.empty:
+        st.info("No recipes found within this cooking-time limit.")
+    else:
+        sample_to_show = filtered_recipes.head(5)
+        for _, row in sample_to_show.iterrows():
+            name = row.get("name")
+            recipe_title = str(name).title() if pd.notna(name) and str(name).strip() else "Untitled Recipe"
+
+            raw_min = row.get("minutes")
+            if pd.notna(raw_min):
+                try:
+                    min_val = float(raw_min)
+                    time_str = f"{int(min_val)} mins" if min_val.is_integer() else f"{min_val} mins"
+                except (ValueError, TypeError):
+                    time_str = f"{raw_min} mins"
+            else:
+                time_str = "Time not specified"
+
+            ing_str = format_recipe_ingredients(row.get("ingredients"))
+
+            with st.container():
+                st.markdown(f"**🍽️ {recipe_title}** &nbsp;·&nbsp; ⏱️ *{time_str}*")
+                st.markdown(
+                    f"<p style='color:#4B5563; font-size:0.9rem; margin-top:-0.3rem; margin-bottom:0.75rem;'>"
+                    f"<strong>Ingredients:</strong> {ing_str}"
+                    f"</p>",
+                    unsafe_allow_html=True,
+                )
 
 # ── Footer info card ──────────────────────────────────────────────────────────
 st.markdown(
