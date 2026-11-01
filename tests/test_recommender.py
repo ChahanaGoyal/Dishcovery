@@ -200,7 +200,9 @@ class TestRankRecipes:
         assert rank_recipes(None, sample_recipes_df) == []
 
     def test_invalid_or_empty_recipe_data_does_not_crash(self):
-        """Malformed rows (NaNs, empty ingredients, missing times) are handled safely."""
+        """Malformed rows (NaNs, empty ingredients, missing times) are handled safely
+        and recipes without usable ingredient information are cleanly excluded.
+        """
         dirty_df = pd.DataFrame(
             {
                 "id": [1, 2, 3],
@@ -210,11 +212,49 @@ class TestRankRecipes:
             }
         )
         results = rank_recipes(["salt"], dirty_df, top_n=5)
-        assert len(results) == 3
-        # Recipe with salt should be top
+        # Recipes 1 and 2 have empty/null ingredients and are excluded; only recipe 3 is valid
+        assert len(results) == 1
         assert results[0].recipe_id == "3"
         assert results[0].match_percentage == 100.0
         assert results[0].cooking_time == 15
+
+    def test_recipe_below_min_match_threshold_is_excluded(self, sample_recipes_df):
+        """Case 7: Recipes below the min_match threshold are excluded."""
+        # User has tomato and olive oil:
+        # r1: 2/3 = 66.67%
+        # r2: 1/4 = 25.0%
+        # r3: 1/5 = 20.0%
+        # r4: 0/3 = 0.0%
+        results = rank_recipes(
+            user_ingredients=["tomato", "olive oil"],
+            df=sample_recipes_df,
+            min_match=50.0,
+        )
+        assert len(results) == 1
+        assert results[0].recipe_id == "r1"
+        assert results[0].match_percentage >= 50.0
+
+    def test_recipe_meeting_threshold_is_retained(self, sample_recipes_df):
+        """Case 8: Recipes meeting or exceeding threshold are retained."""
+        results = rank_recipes(
+            user_ingredients=["tomato", "olive oil"],
+            df=sample_recipes_df,
+            min_match=25.0,
+        )
+        # r1 (66.67%) and r2 (25.0%) meet threshold 25.0%
+        assert len(results) == 2
+        assert [r.recipe_id for r in results] == ["r1", "r2"]
+
+    def test_invalid_threshold_raises_value_error(self, sample_recipes_df):
+        """Case 9: An invalid threshold produces a clear ValueError."""
+        with pytest.raises(ValueError, match="min_match must be a float or int between 0.0 and 100.0"):
+            rank_recipes(["tomato"], sample_recipes_df, min_match=-1.0)
+
+        with pytest.raises(ValueError, match="min_match must be a float or int between 0.0 and 100.0"):
+            rank_recipes(["tomato"], sample_recipes_df, min_match=101.0)
+
+        with pytest.raises(ValueError, match="min_match must be a float or int between 0.0 and 100.0"):
+            rank_recipes(["tomato"], sample_recipes_df, min_match="50")
 
     def test_does_not_mutate_input_dataframe(self, sample_recipes_df):
         """Source DataFrame remains completely unmodified."""

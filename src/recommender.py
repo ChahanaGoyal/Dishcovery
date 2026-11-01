@@ -155,6 +155,7 @@ def calculate_match_score(
 def match_recipes(
     user_ingredients: list[str] | set[str] | None,
     df: pd.DataFrame,
+    min_match: float = 0.0,
 ) -> list[Recipe]:
     """Calculate match metrics for every recipe in the DataFrame.
 
@@ -164,13 +165,15 @@ def match_recipes(
         Ingredients available to the user.
     df:
         DataFrame containing recipe data.
+    min_match:
+        Optional minimum match percentage threshold in [0.0, 100.0] (default: 0.0).
 
     Returns
     -------
     list[Recipe]
         List of Recipe objects containing match percentages and missing ingredients.
     """
-    return rank_recipes(user_ingredients, df, top_n=len(df) if df is not None else 0, min_match=0.0)
+    return rank_recipes(user_ingredients, df, top_n=len(df) if df is not None else 0, min_match=min_match)
 
 
 def rank_recipes(
@@ -200,7 +203,17 @@ def rank_recipes(
     -------
     list[Recipe]
         Ranked list of Recipe results.
+
+    Raises
+    ------
+    ValueError
+        If min_match is not a number between 0.0 and 100.0, or if df lacks an ingredients column.
     """
+    if not isinstance(min_match, (int, float)) or not (0.0 <= min_match <= 100.0):
+        raise ValueError(
+            f"min_match must be a float or int between 0.0 and 100.0, got {min_match!r}"
+        )
+
     if top_n <= 0 or df is None or df.empty:
         return []
 
@@ -258,7 +271,12 @@ def rank_recipes(
     candidates: list[Recipe] = []
 
     for recipe_id, title, raw_ing, cooking_time in zip(ids, titles, raw_ings, times):
-        pct, matched, missing = calculate_match_score(user_set, raw_ing)
+        recipe_clean = _parse_and_clean_ingredients(raw_ing)
+        if not recipe_clean:
+            # Exclude recipes that have no usable ingredient information
+            continue
+
+        pct, matched, missing = calculate_match_score(user_set, recipe_clean)
         if pct < min_match:
             continue
 
