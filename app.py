@@ -16,6 +16,8 @@ import pandas as pd
 import streamlit as st
 
 from src.data_loader import get_data_dir, load_csv, validate_foodcom_columns
+from src.preprocessing import clean_ingredient_list
+from src.recommender import Recipe, rank_recipes
 
 # ── Page configuration ────────────────────────────────────────────────────────
 st.set_page_config(
@@ -196,6 +198,58 @@ def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
         return None, f"Error loading recipe dataset: {exc}"
 
 
+def render_recipe_card(recipe: Recipe) -> None:
+    """Render a single recipe recommendation card using Streamlit components.
+
+    Shows:
+    - Recipe title/name
+    - Match percentage
+    - Cooking time in minutes
+    - Required ingredients
+    - Missing ingredients (or all ingredients available message)
+    """
+    title_str = str(recipe.title).title() if recipe.title and str(recipe.title).strip() else "Untitled Recipe"
+    time_str = f"{recipe.cooking_time} mins" if recipe.cooking_time is not None else "Time not specified"
+    match_pct = round(recipe.match_percentage, 1)
+
+    with st.container():
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown(f"#### 🍽️ {title_str}")
+        with col2:
+            st.markdown(f"**🎯 Match: {match_pct}%**")
+            st.caption(f"⏱️ {time_str}")
+
+        total_req = recipe.matched_ingredients + recipe.missing_ingredients
+        if total_req:
+            st.markdown(
+                f"<p style='color:#374151; font-size:0.9rem; margin-bottom:0.3rem;'>"
+                f"<strong>📋 Required Ingredients:</strong> {', '.join(total_req)}"
+                f"</p>",
+                unsafe_allow_html=True,
+            )
+
+        if recipe.matched_ingredients:
+            st.markdown(
+                f"<p style='color:#065F46; font-size:0.9rem; margin-bottom:0.3rem;'>"
+                f"<strong>✅ You Have ({len(recipe.matched_ingredients)}):</strong> {', '.join(recipe.matched_ingredients)}"
+                f"</p>",
+                unsafe_allow_html=True,
+            )
+
+        if recipe.missing_ingredients:
+            st.markdown(
+                f"<p style='color:#991B1B; font-size:0.9rem; margin-bottom:0.5rem;'>"
+                f"<strong>🛒 Missing ({len(recipe.missing_ingredients)}):</strong> {', '.join(recipe.missing_ingredients)}"
+                f"</p>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.success("🎉 You have all the listed ingredients!")
+
+        st.markdown("<hr style='margin: 0.75rem 0; border: none; border-top: 1px solid #E5E7EB;'>", unsafe_allow_html=True)
+
+
 # ── Result area ───────────────────────────────────────────────────────────────
 st.divider()
 st.markdown('<div class="section-header">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
@@ -206,20 +260,50 @@ if find_clicked:
     if not cleaned_ingredients:
         st.warning("Please enter at least one ingredient before searching.")
     else:
-        time_label = cooking_time if cooking_time != "Any cooking time" else "any duration"
-        st.info(
-            f"**Cleaned ingredients ({len(cleaned_ingredients)}):** "
-            + ", ".join(f"`{i}`" for i in cleaned_ingredients)
-            + f"\n\n**Cooking time filter:** {time_label}\n\n"
-            "🚧 The recommendation engine is coming soon! "
-            "Recipe recommendations based on your ingredients will be added in a later development step.",
-            icon="🔍",
-        )
+        recipes_df, load_err = load_recipe_catalog()
+
+        if load_err:
+            st.warning(load_err)
+        elif recipes_df is None or recipes_df.empty:
+            st.warning("Recipe dataset is empty or not available.")
+        else:
+            time_label = cooking_time if cooking_time != "Any cooking time" else "any duration"
+            st.info(
+                f"**Searching with ingredients ({len(cleaned_ingredients)}):** "
+                + ", ".join(f"`{i}`" for i in cleaned_ingredients)
+                + f" &nbsp;·&nbsp; **Max cooking time:** {time_label}",
+                icon="🔍",
+            )
+
+            try:
+                filtered_df = filter_by_cooking_time(recipes_df, cooking_time)
+
+                if filtered_df.empty:
+                    st.info("No recipes found within this cooking-time limit.")
+                else:
+                    recommendations = rank_recipes(
+                        user_ingredients=cleaned_ingredients,
+                        df=filtered_df,
+                        top_n=5,
+                        min_match=0.0,
+                    )
+                    matched_recs = [r for r in recommendations if r.match_percentage > 0.0]
+
+                    if not matched_recs:
+                        st.info("No recipes found matching your ingredients within this cooking-time limit.")
+                    else:
+                        st.markdown(
+                            f"**Top {len(matched_recs)} recommended recipe(s) based on your ingredients:**"
+                        )
+                        for rec in matched_recs:
+                            render_recipe_card(rec)
+
+            except Exception:
+                st.error("An unexpected error occurred while generating recommendations. Please try again.")
 else:
     st.markdown(
         "<p style='color:#9CA3AF; font-style:italic;'>"
-        "Enter your ingredients above and click <strong>Find Recipes</strong> to get started. "
-        "Recipe recommendations will be added in a later development step."
+        "Enter your ingredients above and click <strong>Find Recipes</strong> to discover matching dishes."
         "</p>",
         unsafe_allow_html=True,
     )
@@ -237,8 +321,7 @@ elif recipes_df is not None and not recipes_df.empty:
 
     st.caption(
         f"Showing up to 5 sample recipes from the dataset matching: **{cooking_time}** "
-        f"({len(filtered_recipes)} matching in catalog). "
-        "These are sample entries to verify data loading; personalized recommendation ranking will be added soon."
+        f"({len(filtered_recipes)} matching in catalog)."
     )
 
     if filtered_recipes.empty:
@@ -276,7 +359,7 @@ st.markdown(
     <div class="info-card">
         <strong>🛠️ Project status</strong><br>
         Dishcovery is under active development.
-        The ML recommendation engine will be connected once the dataset pipeline is finalised.
+        Baseline ingredient matching is active; ML similarity models will be added in a future update.
     </div>
     """,
     unsafe_allow_html=True,
