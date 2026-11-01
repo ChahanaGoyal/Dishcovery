@@ -15,7 +15,9 @@ from app import (
     filter_by_cooking_time,
     format_recipe_ingredients,
     parse_ingredients,
+    render_recipe_card,
 )
+from src.recommender import Recipe, rank_recipes
 
 
 @pytest.fixture
@@ -140,3 +142,60 @@ class TestIngredientInputValidation:
 
     def test_whitespace_and_commas_only(self):
         assert parse_ingredients("  ,  ,  ") == []
+
+
+class TestRecipeCardRendering:
+    def test_recipe_card_with_missing_ingredients(self):
+        recipe = Recipe(
+            recipe_id="r1",
+            title="Tomato Pasta",
+            matched_ingredients=["tomato", "pasta"],
+            missing_ingredients=["olive oil", "garlic"],
+            match_percentage=50.0,
+            cooking_time=20,
+        )
+        render_recipe_card(recipe)
+
+    def test_recipe_card_with_all_ingredients(self):
+        recipe = Recipe(
+            recipe_id="r2",
+            title="Quick Salad",
+            matched_ingredients=["lettuce", "tomato"],
+            missing_ingredients=[],
+            match_percentage=100.0,
+            cooking_time=5,
+        )
+        render_recipe_card(recipe)
+
+    def test_recipe_card_with_missing_optional_fields(self):
+        recipe = Recipe(
+            recipe_id="r3",
+            title="",
+            matched_ingredients=[],
+            missing_ingredients=[],
+            match_percentage=0.0,
+            cooking_time=None,
+        )
+        render_recipe_card(recipe)
+
+
+class TestRecommendationIntegration:
+    def test_recommendation_flow_ranks_matching_recipes(self, sample_recipe_df):
+        user_input = "tomato, garlic, pasta"
+        cleaned = parse_ingredients(user_input)
+        recs = rank_recipes(cleaned, sample_recipe_df, top_n=5)
+        assert len(recs) > 0
+        assert recs[0].match_percentage > 0.0
+
+    def test_recommendation_with_cooking_time_filter(self, sample_recipe_df):
+        cleaned = parse_ingredients("lettuce, tomato")
+        filtered_df = filter_by_cooking_time(sample_recipe_df, "Up to 15 minutes")
+        recs = rank_recipes(cleaned, filtered_df, top_n=5)
+        for r in recs:
+            if r.cooking_time is not None:
+                assert r.cooking_time <= 15
+
+    def test_recommendation_empty_ingredients_returns_empty(self, sample_recipe_df):
+        cleaned = parse_ingredients("")
+        recs = rank_recipes(cleaned, sample_recipe_df, top_n=5)
+        assert recs == []
