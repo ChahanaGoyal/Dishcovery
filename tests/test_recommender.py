@@ -16,6 +16,7 @@ from src.recommender import (
     calculate_match_score,
     match_recipes,
     rank_recipes,
+    rank_recipes_tfidf,
 )
 
 
@@ -420,3 +421,70 @@ class TestRealDatasetIntegration:
         assert isinstance(top.missing_ingredients, list)
         if top.cooking_time is not None:
             assert isinstance(top.cooking_time, int)
+
+
+# ── TF-IDF Recommender Tests ──────────────────────────────────────────────────
+
+
+class TestRankRecipesTFIDF:
+    """Tests for rank_recipes_tfidf (TF-IDF cosine similarity method)."""
+
+    @pytest.fixture
+    def tfidf_df(self) -> pd.DataFrame:
+        """Small recipe DataFrame with known ingredient profiles."""
+        return pd.DataFrame(
+            {
+                "id": ["t1", "t2", "t3"],
+                "name": ["Tomato Pasta", "Chicken Curry", "Garlic Bread"],
+                "ingredients": [
+                    "['pasta', 'tomato', 'garlic', 'olive oil']",
+                    "['chicken', 'curry powder', 'onion', 'yogurt']",
+                    "['bread', 'garlic', 'butter', 'parsley']",
+                ],
+                "minutes": [20, 40, 15],
+            }
+        )
+
+    def test_returns_list_of_recipes(self, tfidf_df):
+        results = rank_recipes_tfidf(["tomato", "pasta", "garlic"], tfidf_df, top_n=3)
+        assert isinstance(results, list)
+        assert all(isinstance(r, Recipe) for r in results)
+
+    def test_top_result_is_most_similar(self, tfidf_df):
+        results = rank_recipes_tfidf(["tomato", "pasta", "garlic", "olive oil"], tfidf_df, top_n=3)
+        assert len(results) > 0
+        # Top result should have the highest similarity score
+        for i in range(len(results) - 1):
+            assert results[i].similarity_score >= results[i + 1].similarity_score
+
+    def test_similarity_score_is_in_valid_range(self, tfidf_df):
+        results = rank_recipes_tfidf(["chicken", "curry powder"], tfidf_df, top_n=3)
+        for r in results:
+            assert r.similarity_score is not None
+            assert 0.0 <= r.similarity_score <= 1.0
+            assert 0.0 <= r.match_percentage <= 100.0
+
+    def test_score_label_is_similarity_not_overlap(self, tfidf_df):
+        """similarity_score is populated; match_percentage == similarity_score * 100."""
+        results = rank_recipes_tfidf(["garlic", "bread", "butter"], tfidf_df, top_n=3)
+        for r in results:
+            assert r.similarity_score is not None
+            assert abs(r.match_percentage - round(r.similarity_score * 100, 2)) < 0.01
+
+    def test_empty_user_input_returns_empty(self, tfidf_df):
+        assert rank_recipes_tfidf([], tfidf_df, top_n=5) == []
+        assert rank_recipes_tfidf("", tfidf_df, top_n=5) == []
+        assert rank_recipes_tfidf(None, tfidf_df, top_n=5) == []
+
+    def test_empty_dataframe_returns_empty(self):
+        empty_df = pd.DataFrame(columns=["id", "name", "ingredients", "minutes"])
+        assert rank_recipes_tfidf(["tomato"], empty_df, top_n=5) == []
+
+    def test_top_n_limits_results(self, tfidf_df):
+        results = rank_recipes_tfidf(["garlic"], tfidf_df, top_n=1)
+        assert len(results) <= 1
+
+    def test_string_input_accepted(self, tfidf_df):
+        """A plain comma-separated string is accepted as user input."""
+        results = rank_recipes_tfidf("tomato, pasta", tfidf_df, top_n=3)
+        assert len(results) > 0

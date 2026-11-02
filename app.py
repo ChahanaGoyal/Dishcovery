@@ -18,7 +18,7 @@ import streamlit as st
 
 from src.data_loader import get_data_dir, load_csv, validate_foodcom_columns
 from src.preprocessing import clean_ingredient_list
-from src.recommender import Recipe, rank_recipes
+from src.recommender import Recipe, rank_recipes, rank_recipes_tfidf
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,21 @@ cooking_time = st.selectbox(
     index=0,
     label_visibility="collapsed",
     help="Filter recipes by how long they take to prepare.",
+)
+
+# ── Recommendation method selector ───────────────────────────────────────────
+st.markdown('<div class="section-header">🤖 Recommendation method</div>', unsafe_allow_html=True)
+
+rec_method = st.radio(
+    label="Recommendation method",
+    options=["Baseline (Ingredient Overlap)", "Improved (TF-IDF Similarity)"],
+    index=0,
+    horizontal=True,
+    label_visibility="collapsed",
+    help=(
+        "Baseline counts how many recipe ingredients you have. "
+        "TF-IDF uses text similarity to find recipes whose ingredient profiles are closest to yours."
+    ),
 )
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -201,12 +216,12 @@ def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
         return None, f"Error loading recipe dataset: {exc}"
 
 
-def render_recipe_card(recipe: Recipe) -> None:
+def render_recipe_card(recipe: Recipe, score_label: str = "Match") -> None:
     """Render a single recipe recommendation card using Streamlit components.
 
     Shows:
     - Recipe title/name
-    - Match percentage
+    - Match percentage or similarity score (labelled by score_label)
     - Cooking time in minutes
     - Required ingredients
     - Missing ingredients (or all ingredients available message)
@@ -220,7 +235,7 @@ def render_recipe_card(recipe: Recipe) -> None:
         with col1:
             st.markdown(f"#### 🍽️ {title_str}")
         with col2:
-            st.markdown(f"**🎯 Match: {match_pct}%**")
+            st.markdown(f"**🎯 {score_label}: {match_pct}%**")
             st.caption(f"⏱️ {time_str}")
 
         total_req = recipe.matched_ingredients + recipe.missing_ingredients
@@ -274,10 +289,13 @@ if find_clicked:
             )
         else:
             time_label = cooking_time if cooking_time != "Any cooking time" else "any duration"
+            use_tfidf = rec_method.startswith("Improved")
+            method_label = "TF-IDF Similarity" if use_tfidf else "Ingredient Overlap"
             st.info(
                 f"**Searching with ingredients ({len(cleaned_ingredients)}):** "
                 + ", ".join(f"`{i}`" for i in cleaned_ingredients)
-                + f" &nbsp;·&nbsp; **Max cooking time:** {time_label}",
+                + f" &nbsp;·&nbsp; **Max cooking time:** {time_label}"
+                + f" &nbsp;·&nbsp; **Method:** {method_label}",
                 icon="🔍",
             )
 
@@ -290,12 +308,22 @@ if find_clicked:
                         "Try adding more ingredients or increasing your cooking-time limit."
                     )
                 else:
-                    recommendations = rank_recipes(
-                        user_ingredients=cleaned_ingredients,
-                        df=filtered_df,
-                        top_n=5,
-                        min_match=0.0,
-                    )
+                    if use_tfidf:
+                        recommendations = rank_recipes_tfidf(
+                            user_ingredients=cleaned_ingredients,
+                            df=filtered_df,
+                            top_n=5,
+                        )
+                        score_label = "Similarity"
+                    else:
+                        recommendations = rank_recipes(
+                            user_ingredients=cleaned_ingredients,
+                            df=filtered_df,
+                            top_n=5,
+                            min_match=0.0,
+                        )
+                        score_label = "Match"
+
                     matched_recs = [r for r in recommendations if r.match_percentage > 0.0]
 
                     if not matched_recs:
@@ -305,10 +333,11 @@ if find_clicked:
                         )
                     else:
                         st.markdown(
-                            f"**Top {len(matched_recs)} recommended recipe(s) based on your ingredients:**"
+                            f"**Top {len(matched_recs)} recommended recipe(s) based on your ingredients "
+                            f"({method_label}):**"
                         )
                         for rec in matched_recs:
-                            render_recipe_card(rec)
+                            render_recipe_card(rec, score_label=score_label)
 
             except Exception as exc:
                 logger.error("Error during recipe recommendation: %s", exc, exc_info=True)
@@ -371,8 +400,8 @@ st.markdown(
     """
     <div class="info-card">
         <strong>🛠️ Project status</strong><br>
-        Dishcovery is under active development.
-        Baseline ingredient matching is active; ML similarity models will be added in a future update.
+        Dishcovery is complete for the college ML project demonstration.
+        Two recommendation methods are available: baseline ingredient overlap and TF-IDF cosine similarity.
     </div>
     """,
     unsafe_allow_html=True,
