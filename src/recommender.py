@@ -22,6 +22,8 @@ import logging
 from dataclasses import dataclass, field
 
 import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from src.preprocessing import clean_ingredient_list, parse_ingredient_list
 
@@ -41,13 +43,15 @@ class Recipe:
     matched_ingredients:
         List of recipe ingredients available to the user.
     score:
-        Match score in [0.0, 1.0] (normalized match percentage).
+        Match score in [0.0, 1.0] (normalized match percentage or cosine similarity).
     match_percentage:
         Match score as a percentage in [0.0, 100.0].
     missing_ingredients:
         List of recipe ingredients the user is missing.
     cooking_time:
         Total preparation and cooking time in minutes (if available).
+    similarity_score:
+        Cosine similarity score in [0.0, 1.0] when using TF-IDF recommendation.
     """
 
     recipe_id: str
@@ -57,12 +61,15 @@ class Recipe:
     match_percentage: float = 0.0
     missing_ingredients: list[str] = field(default_factory=list)
     cooking_time: int | None = None
+    similarity_score: float | None = None
 
     def __post_init__(self) -> None:
-        if self.match_percentage == 0.0 and self.score > 0.0:
+        if self.match_percentage == 0.0 and self.score > 0.0 and self.similarity_score is None:
             self.match_percentage = round(self.score * 100.0, 2)
         elif self.score == 0.0 and self.match_percentage > 0.0:
             self.score = round(self.match_percentage / 100.0, 4)
+        elif self.similarity_score is not None and self.score == 0.0:
+            self.score = round(self.similarity_score, 4)
 
     @property
     def name(self) -> str:
@@ -79,6 +86,7 @@ class Recipe:
             "missing_ingredients": self.missing_ingredients,
             "cooking_time": self.cooking_time,
             "score": self.score,
+            "similarity_score": self.similarity_score,
         }
 
 
@@ -133,7 +141,10 @@ def calculate_match_score(
     if not user_ingredients:
         return 0.0, [], recipe_clean
 
-    if isinstance(user_ingredients, set):
+    if isinstance(user_ingredients, str):
+        user_clean = _parse_and_clean_ingredients(user_ingredients)
+        user_set = set(user_clean)
+    elif isinstance(user_ingredients, set):
         user_set = {
             i.strip().lower()
             for i in user_ingredients
@@ -155,6 +166,7 @@ def calculate_match_score(
 def match_recipes(
     user_ingredients: list[str] | set[str] | None,
     df: pd.DataFrame,
+    min_match: float = 0.0,
 ) -> list[Recipe]:
     """Calculate match metrics for every recipe in the DataFrame.
 
@@ -164,13 +176,15 @@ def match_recipes(
         Ingredients available to the user.
     df:
         DataFrame containing recipe data.
+    min_match:
+        Optional minimum match percentage threshold in [0.0, 100.0] (default: 0.0).
 
     Returns
     -------
     list[Recipe]
         List of Recipe objects containing match percentages and missing ingredients.
     """
-    return rank_recipes(user_ingredients, df, top_n=len(df) if df is not None else 0, min_match=0.0)
+    return rank_recipes(user_ingredients, df, top_n=len(df) if df is not None else 0, min_match=min_match)
 
 
 def rank_recipes(
@@ -200,14 +214,26 @@ def rank_recipes(
     -------
     list[Recipe]
         Ranked list of Recipe results.
+
+    Raises
+    ------
+    ValueError
+        If min_match is not a number between 0.0 and 100.0, or if df lacks an ingredients column.
     """
+    if not isinstance(min_match, (int, float)) or not (0.0 <= min_match <= 100.0):
+        raise ValueError(
+            f"min_match must be a float or int between 0.0 and 100.0, got {min_match!r}"
+        )
+
     if top_n <= 0 or df is None or df.empty:
         return []
 
     if not user_ingredients:
         return []
 
-    if isinstance(user_ingredients, set):
+    if isinstance(user_ingredients, str):
+        user_clean = _parse_and_clean_ingredients(user_ingredients)
+    elif isinstance(user_ingredients, set):
         user_clean = [
             i.strip().lower()
             for i in user_ingredients
@@ -258,7 +284,12 @@ def rank_recipes(
     candidates: list[Recipe] = []
 
     for recipe_id, title, raw_ing, cooking_time in zip(ids, titles, raw_ings, times):
-        pct, matched, missing = calculate_match_score(user_set, raw_ing)
+        recipe_clean = _parse_and_clean_ingredients(raw_ing)
+        if not recipe_clean:
+            # Exclude recipes that have no usable ingredient information
+            continue
+
+        pct, matched, missing = calculate_match_score(user_set, recipe_clean)
         if pct < min_match:
             continue
 
@@ -359,3 +390,143 @@ class IngredientRecommender:
     def is_fitted(self) -> bool:
         """True once fit() has been called with a valid dataset."""
         return self._is_fitted
+
+
+# ── TF-IDF / Cosine Similarity Recommendation ────────────────────────────────
+
+
+def rank_recipes_tfidf(
+    user_ingredients: list[str] | str | None,
+    df: pd.DataFrame,
+    top_n: int = 5,
+) -> list[Recipe]:
+    """Rank recipes using TF-IDF vectors and cosine similarity.
+
+    Converts each recipe's ingredient list and the user's ingredients into
+    TF-IDF representations, then ranks recipes by cosine similarity to the
+    user's ingredient query.
+
+    **Score label:** The ``similarity_score`` field holds the raw cosine
+    similarity value in [0.0, 1.0]. It is *not* a match percentage — do not
+    display it as one.
+
+    Parameters
+    ----------
+    user_ingredients:
+        List of ingredient strings provided by the user, or a comma-separated
+        string, or None/empty.
+    df:
+        Recipe DataFrame. Supports both Food.com columns
+        ('id', 'name', 'ingredients', 'minutes') and preprocessed columns
+        ('recipe_id', 'title', 'ingredients_clean', 'cooking_time').
+    top_n:
+        Maximum number of recipes to return (default: 5).
+
+    Returns
+    -------
+    list[Recipe]
+        Recipes ranked by cosine similarity (highest first).
+        Each Recipe has ``similarity_score`` populated and
+        ``match_percentage`` set to ``similarity_score * 100``.
+        The ``matched_ingredients`` and ``missing_ingredients`` fields
+        are computed using the same baseline overlap logic for transparency.
+    """
+    if top_n <= 0 or df is None or df.empty:
+        return []
+
+    # Normalise user input
+    if not user_ingredients:
+        return []
+    if isinstance(user_ingredients, str):
+        user_clean = _parse_and_clean_ingredients(user_ingredients)
+    else:
+        user_clean = clean_ingredient_list(list(user_ingredients))
+
+    if not user_clean:
+        return []
+
+    # Resolve column names (same logic as rank_recipes)
+    id_col = "recipe_id" if "recipe_id" in df.columns else ("id" if "id" in df.columns else None)
+    title_col = "title" if "title" in df.columns else ("name" if "name" in df.columns else None)
+    ing_col = (
+        "ingredients_clean"
+        if "ingredients_clean" in df.columns
+        else ("ingredients" if "ingredients" in df.columns else None)
+    )
+    time_col = "minutes" if "minutes" in df.columns else ("cooking_time" if "cooking_time" in df.columns else None)
+
+    if ing_col is None:
+        raise ValueError(
+            "DataFrame must contain an ingredients column ('ingredients_clean' or 'ingredients')."
+        )
+
+    ids = [str(x) for x in df[id_col].tolist()] if id_col else [str(i) for i in range(len(df))]
+    titles = (
+        [str(x) if pd.notna(x) else "" for x in df[title_col].tolist()]
+        if title_col
+        else [f"Recipe {i}" for i in ids]
+    )
+    raw_ings = df[ing_col].tolist()
+
+    if time_col:
+        times: list[int | None] = []
+        for val in df[time_col].tolist():
+            try:
+                times.append(int(val) if pd.notna(val) else None)
+            except (ValueError, TypeError):
+                times.append(None)
+    else:
+        times = [None] * len(df)
+
+    # Build cleaned ingredient text for each recipe (filter out empties)
+    recipe_texts: list[str] = []
+    valid_indices: list[int] = []
+
+    for i, raw_ing in enumerate(raw_ings):
+        cleaned = _parse_and_clean_ingredients(raw_ing)
+        if cleaned:
+            recipe_texts.append(" ".join(cleaned))
+            valid_indices.append(i)
+
+    if not recipe_texts:
+        logger.warning("rank_recipes_tfidf: no recipes with usable ingredient text.")
+        return []
+
+    user_text = " ".join(user_clean)
+
+    # Fit TF-IDF on recipe corpus, then transform user query
+    try:
+        vectorizer = TfidfVectorizer(token_pattern=r"[a-z][a-z ]+")
+        recipe_matrix = vectorizer.fit_transform(recipe_texts)
+        user_vector = vectorizer.transform([user_text])
+    except ValueError as exc:
+        logger.warning("rank_recipes_tfidf: TF-IDF vectorization failed (%s). Returning empty.", exc)
+        return []
+
+    sims = cosine_similarity(user_vector, recipe_matrix)[0]  # shape (n_recipes,)
+
+    # Build Recipe objects, including baseline overlap for matched/missing info
+    user_set = set(user_clean)
+    candidates: list[Recipe] = []
+
+    for rank_idx, orig_idx in enumerate(valid_indices):
+        sim = float(sims[rank_idx])
+        recipe_ing_clean = _parse_and_clean_ingredients(raw_ings[orig_idx])
+        _, matched, missing = calculate_match_score(user_set, recipe_ing_clean)
+
+        candidates.append(
+            Recipe(
+                recipe_id=ids[orig_idx],
+                title=titles[orig_idx],
+                matched_ingredients=matched,
+                missing_ingredients=missing,
+                score=round(sim, 4),
+                match_percentage=round(sim * 100.0, 2),
+                cooking_time=times[orig_idx],
+                similarity_score=round(sim, 4),
+            )
+        )
+
+    # Sort by similarity descending, break ties alphabetically by title
+    candidates.sort(key=lambda r: (-r.similarity_score, r.title, r.recipe_id))  # type: ignore[arg-type]
+    return candidates[:top_n]
