@@ -200,7 +200,9 @@ class TestRankRecipes:
         assert rank_recipes(None, sample_recipes_df) == []
 
     def test_invalid_or_empty_recipe_data_does_not_crash(self):
-        """Malformed rows (NaNs, empty ingredients, missing times) are handled safely."""
+        """Malformed rows (NaNs, empty ingredients, missing times) are handled safely
+        and recipes without usable ingredient information are cleanly excluded.
+        """
         dirty_df = pd.DataFrame(
             {
                 "id": [1, 2, 3],
@@ -210,11 +212,49 @@ class TestRankRecipes:
             }
         )
         results = rank_recipes(["salt"], dirty_df, top_n=5)
-        assert len(results) == 3
-        # Recipe with salt should be top
+        # Recipes 1 and 2 have empty/null ingredients and are excluded; only recipe 3 is valid
+        assert len(results) == 1
         assert results[0].recipe_id == "3"
         assert results[0].match_percentage == 100.0
         assert results[0].cooking_time == 15
+
+    def test_recipe_below_min_match_threshold_is_excluded(self, sample_recipes_df):
+        """Case 7: Recipes below the min_match threshold are excluded."""
+        # User has tomato and olive oil:
+        # r1: 2/3 = 66.67%
+        # r2: 1/4 = 25.0%
+        # r3: 1/5 = 20.0%
+        # r4: 0/3 = 0.0%
+        results = rank_recipes(
+            user_ingredients=["tomato", "olive oil"],
+            df=sample_recipes_df,
+            min_match=50.0,
+        )
+        assert len(results) == 1
+        assert results[0].recipe_id == "r1"
+        assert results[0].match_percentage >= 50.0
+
+    def test_recipe_meeting_threshold_is_retained(self, sample_recipes_df):
+        """Case 8: Recipes meeting or exceeding threshold are retained."""
+        results = rank_recipes(
+            user_ingredients=["tomato", "olive oil"],
+            df=sample_recipes_df,
+            min_match=25.0,
+        )
+        # r1 (66.67%) and r2 (25.0%) meet threshold 25.0%
+        assert len(results) == 2
+        assert [r.recipe_id for r in results] == ["r1", "r2"]
+
+    def test_invalid_threshold_raises_value_error(self, sample_recipes_df):
+        """Case 9: An invalid threshold produces a clear ValueError."""
+        with pytest.raises(ValueError, match="min_match must be a float or int between 0.0 and 100.0"):
+            rank_recipes(["tomato"], sample_recipes_df, min_match=-1.0)
+
+        with pytest.raises(ValueError, match="min_match must be a float or int between 0.0 and 100.0"):
+            rank_recipes(["tomato"], sample_recipes_df, min_match=101.0)
+
+        with pytest.raises(ValueError, match="min_match must be a float or int between 0.0 and 100.0"):
+            rank_recipes(["tomato"], sample_recipes_df, min_match="50")
 
     def test_does_not_mutate_input_dataframe(self, sample_recipes_df):
         """Source DataFrame remains completely unmodified."""
@@ -249,6 +289,74 @@ class TestRankRecipes:
         assert d["recipe_id"] == "101"
         assert d["match_percentage"] == 66.67
         assert d["cooking_time"] == 20
+
+    def test_partial_ingredient_controlled_3_recipes(self):
+        """Prompt 22 Task 3: Controlled 3-recipe test with partial ingredient input."""
+        df = pd.DataFrame(
+            {
+                "recipe_id": ["p1", "p2", "p3"],
+                "title": ["Margherita Pizza", "Tomato Bruschetta", "Garlic Butter Pasta"],
+                "ingredients": [
+                    "flour, yeast, tomato, mozzarella, basil",   # 5 items
+                    "bread, tomato, garlic, basil",              # 4 items
+                    "pasta, garlic, butter, parmesan",           # 4 items
+                ],
+                "minutes": [45, 15, 20],
+            }
+        )
+        # User provides 2 ingredients: tomato and basil
+        results = rank_recipes(["tomato", "basil"], df, top_n=3)
+        assert len(results) == 3
+
+        # p2 (Bruschetta) has 2/4 = 50.0% match
+        assert results[0].recipe_id == "p2"
+        assert results[0].match_percentage == 50.0
+        assert results[0].missing_ingredients == ["bread", "garlic"]
+
+        # p1 (Pizza) has 2/5 = 40.0% match
+        assert results[1].recipe_id == "p1"
+        assert results[1].match_percentage == 40.0
+        assert results[1].missing_ingredients == ["flour", "yeast", "mozzarella"]
+
+        # p3 (Pasta) has 0/4 = 0.0% match
+        assert results[2].recipe_id == "p3"
+        assert results[2].match_percentage == 0.0
+        assert set(results[2].missing_ingredients) == {"pasta", "garlic", "butter", "parmesan"}
+
+    def test_equal_scores_handled_consistently_with_tie_breaking(self):
+        """Prompt 22 Task 3: Equal scores broken by fewest missing ingredients then title."""
+        df = pd.DataFrame(
+            {
+                "recipe_id": ["e1", "e2", "e3"],
+                "title": ["B Dish", "A Dish", "C Dish"],
+                "ingredients": [
+                    "tomato, salt, garlic, pepper",        # 2/4 = 50.0%, 2 missing
+                    "tomato, salt, onion, cream, butter, oil", # 3/6 = 50.0%, 3 missing
+                    "tomato, salt, herb, spice",           # 2/4 = 50.0%, 2 missing
+                ],
+            }
+        )
+        results = rank_recipes(["tomato", "salt", "onion"], df, top_n=3)
+        # e1 and e3 both have 50.0% with 2 missing; e2 has 50.0% with 3 missing
+        # Between e1 ("B Dish") and e3 ("C Dish"), both have 2 missing, e1 wins alphabetically!
+        assert results[0].recipe_id == "e1"  # 2 missing, title "B Dish"
+        assert results[1].recipe_id == "e3"  # 2 missing, title "C Dish"
+        assert results[2].recipe_id == "e2"  # 3 missing
+
+    def test_duplicate_user_ingredients_do_not_distort_score(self, sample_recipes_df):
+        """Duplicate user ingredients with mixed case/whitespace yield identical results."""
+        clean_input = ["tomato", "onion"]
+        redundant_input = ["tomato", "tomato", "TOMATO", "  onion \t", "ONION"]
+        res_clean = rank_recipes(clean_input, sample_recipes_df)
+        res_redundant = rank_recipes(redundant_input, sample_recipes_df)
+        assert [r.match_percentage for r in res_clean] == [r.match_percentage for r in res_redundant]
+        assert [r.recipe_id for r in res_clean] == [r.recipe_id for r in res_redundant]
+
+    def test_user_ingredient_string_input_handled_seamlessly(self, sample_recipes_df):
+        """Passing a comma-separated string as user_ingredients works seamlessly."""
+        results = rank_recipes("tomato, onion", sample_recipes_df, top_n=2)
+        assert len(results) == 2
+        assert results[0].match_percentage > 0.0
 
 
 # ── IngredientRecommender Class Tests ──────────────────────────────────────────
