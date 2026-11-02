@@ -290,6 +290,74 @@ class TestRankRecipes:
         assert d["match_percentage"] == 66.67
         assert d["cooking_time"] == 20
 
+    def test_partial_ingredient_controlled_3_recipes(self):
+        """Prompt 22 Task 3: Controlled 3-recipe test with partial ingredient input."""
+        df = pd.DataFrame(
+            {
+                "recipe_id": ["p1", "p2", "p3"],
+                "title": ["Margherita Pizza", "Tomato Bruschetta", "Garlic Butter Pasta"],
+                "ingredients": [
+                    "flour, yeast, tomato, mozzarella, basil",   # 5 items
+                    "bread, tomato, garlic, basil",              # 4 items
+                    "pasta, garlic, butter, parmesan",           # 4 items
+                ],
+                "minutes": [45, 15, 20],
+            }
+        )
+        # User provides 2 ingredients: tomato and basil
+        results = rank_recipes(["tomato", "basil"], df, top_n=3)
+        assert len(results) == 3
+
+        # p2 (Bruschetta) has 2/4 = 50.0% match
+        assert results[0].recipe_id == "p2"
+        assert results[0].match_percentage == 50.0
+        assert results[0].missing_ingredients == ["bread", "garlic"]
+
+        # p1 (Pizza) has 2/5 = 40.0% match
+        assert results[1].recipe_id == "p1"
+        assert results[1].match_percentage == 40.0
+        assert results[1].missing_ingredients == ["flour", "yeast", "mozzarella"]
+
+        # p3 (Pasta) has 0/4 = 0.0% match
+        assert results[2].recipe_id == "p3"
+        assert results[2].match_percentage == 0.0
+        assert set(results[2].missing_ingredients) == {"pasta", "garlic", "butter", "parmesan"}
+
+    def test_equal_scores_handled_consistently_with_tie_breaking(self):
+        """Prompt 22 Task 3: Equal scores broken by fewest missing ingredients then title."""
+        df = pd.DataFrame(
+            {
+                "recipe_id": ["e1", "e2", "e3"],
+                "title": ["B Dish", "A Dish", "C Dish"],
+                "ingredients": [
+                    "tomato, salt, garlic, pepper",        # 2/4 = 50.0%, 2 missing
+                    "tomato, salt, onion, cream, butter, oil", # 3/6 = 50.0%, 3 missing
+                    "tomato, salt, herb, spice",           # 2/4 = 50.0%, 2 missing
+                ],
+            }
+        )
+        results = rank_recipes(["tomato", "salt", "onion"], df, top_n=3)
+        # e1 and e3 both have 50.0% with 2 missing; e2 has 50.0% with 3 missing
+        # Between e1 ("B Dish") and e3 ("C Dish"), both have 2 missing, e1 wins alphabetically!
+        assert results[0].recipe_id == "e1"  # 2 missing, title "B Dish"
+        assert results[1].recipe_id == "e3"  # 2 missing, title "C Dish"
+        assert results[2].recipe_id == "e2"  # 3 missing
+
+    def test_duplicate_user_ingredients_do_not_distort_score(self, sample_recipes_df):
+        """Duplicate user ingredients with mixed case/whitespace yield identical results."""
+        clean_input = ["tomato", "onion"]
+        redundant_input = ["tomato", "tomato", "TOMATO", "  onion \t", "ONION"]
+        res_clean = rank_recipes(clean_input, sample_recipes_df)
+        res_redundant = rank_recipes(redundant_input, sample_recipes_df)
+        assert [r.match_percentage for r in res_clean] == [r.match_percentage for r in res_redundant]
+        assert [r.recipe_id for r in res_clean] == [r.recipe_id for r in res_redundant]
+
+    def test_user_ingredient_string_input_handled_seamlessly(self, sample_recipes_df):
+        """Passing a comma-separated string as user_ingredients works seamlessly."""
+        results = rank_recipes("tomato, onion", sample_recipes_df, top_n=2)
+        assert len(results) == 2
+        assert results[0].match_percentage > 0.0
+
 
 # ── IngredientRecommender Class Tests ──────────────────────────────────────────
 

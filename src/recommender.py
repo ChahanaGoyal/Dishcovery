@@ -133,7 +133,10 @@ def calculate_match_score(
     if not user_ingredients:
         return 0.0, [], recipe_clean
 
-    if isinstance(user_ingredients, set):
+    if isinstance(user_ingredients, str):
+        user_clean = _parse_and_clean_ingredients(user_ingredients)
+        user_set = set(user_clean)
+    elif isinstance(user_ingredients, set):
         user_set = {
             i.strip().lower()
             for i in user_ingredients
@@ -220,7 +223,9 @@ def rank_recipes(
     if not user_ingredients:
         return []
 
-    if isinstance(user_ingredients, set):
+    if isinstance(user_ingredients, str):
+        user_clean = _parse_and_clean_ingredients(user_ingredients)
+    elif isinstance(user_ingredients, set):
         user_clean = [
             i.strip().lower()
             for i in user_ingredients

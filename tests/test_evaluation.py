@@ -99,18 +99,46 @@ def mock_recipe_df() -> pd.DataFrame:
 
 class TestEvaluateRecommender:
     def test_evaluates_mock_dataset(self, mock_recipe_df):
-        """Mock dataset evaluation correctly reports all required metrics."""
+        """Mock dataset evaluation with partial inputs correctly reports all required metrics."""
         summary = evaluate_recommender(
             df=mock_recipe_df,
             sample_size=3,
             top_n=3,
             random_state=42,
+            partial_ratio=0.5,
             verbose=False,
         )
+        assert summary["valid_test_cases"] == 3
         assert summary["total_evaluated"] == 3
         assert summary["successful_retrievals"] + summary["unsuccessful_retrievals"] == 3
         assert 0.0 <= summary["retrieval_rate"] <= 100.0
+        assert summary["average_ranking_position"] is not None
+        assert 0.0 <= summary["average_match_percentage"] <= 100.0
+        assert summary["partial_ratio"] == 0.5
+        assert summary["top_n_cutoff"] == 3
+
+    def test_evaluates_mock_dataset_full_input(self, mock_recipe_df):
+        """Full ingredient input scenario (sanity check) yields 100% match."""
+        summary = evaluate_recommender(
+            df=mock_recipe_df,
+            sample_size=3,
+            top_n=3,
+            random_state=42,
+            partial_ratio=1.0,
+            verbose=False,
+        )
+        assert summary["valid_test_cases"] == 3
+        assert summary["retrieval_rate"] == 100.0
         assert summary["average_match_percentage"] == 100.0
+
+    def test_invalid_partial_ratio_raises_value_error(self, mock_recipe_df):
+        """Invalid partial_ratio raises clear ValueError."""
+        with pytest.raises(ValueError, match="partial_ratio must be a number in"):
+            evaluate_recommender(mock_recipe_df, partial_ratio=0.0)
+        with pytest.raises(ValueError, match="partial_ratio must be a number in"):
+            evaluate_recommender(mock_recipe_df, partial_ratio=-0.2)
+        with pytest.raises(ValueError, match="partial_ratio must be a number in"):
+            evaluate_recommender(mock_recipe_df, partial_ratio=1.5)
 
     def test_evaluates_empty_dataframe_safely(self):
         """Empty DataFrame does not divide by zero and returns clean zero metrics."""
