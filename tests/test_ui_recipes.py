@@ -199,3 +199,45 @@ class TestRecommendationIntegration:
         cleaned = parse_ingredients("")
         recs = rank_recipes(cleaned, sample_recipe_df, top_n=5)
         assert recs == []
+
+    def test_higher_match_percentage_appears_first(self, sample_recipe_df):
+        # "lettuce, tomato, pasta":
+        # Quick Salad matches lettuce + tomato (2 / 3 = 66.7%)
+        # Speedy Pasta matches pasta (1 / 3 = 33.3%)
+        cleaned = parse_ingredients("lettuce, tomato, pasta")
+        recs = rank_recipes(cleaned, sample_recipe_df, top_n=5)
+        matched = [r for r in recs if r.match_percentage > 0.0]
+        assert len(matched) >= 2
+        assert matched[0].match_percentage > matched[1].match_percentage
+        assert matched[0].title == "Quick Salad"
+        assert matched[1].title == "Speedy Pasta"
+
+    def test_missing_ingredients_calculated_and_rendered(self, sample_recipe_df):
+        cleaned = parse_ingredients("pasta")
+        recs = rank_recipes(cleaned, sample_recipe_df, top_n=5)
+        pasta_rec = next(r for r in recs if r.title == "Speedy Pasta")
+        assert pasta_rec.matched_ingredients == ["pasta"]
+        assert set(pasta_rec.missing_ingredients) == {"olive oil", "garlic"}
+        # Verify render_recipe_card renders without error
+        render_recipe_card(pasta_rec)
+
+    def test_no_matching_recipes_returns_empty_and_does_not_crash(self, sample_recipe_df):
+        cleaned = parse_ingredients("chocolate, marshmallow, graham cracker")
+        recs = rank_recipes(cleaned, sample_recipe_df, top_n=5)
+        matched = [r for r in recs if r.match_percentage > 0.0]
+        assert matched == []
+
+    def test_invalid_or_whitespace_ingredient_input(self, sample_recipe_df):
+        cleaned = parse_ingredients("  ,  ,  ")
+        assert cleaned == []
+        recs = rank_recipes(cleaned, sample_recipe_df, top_n=5)
+        assert recs == []
+
+    def test_cooking_time_filter_excludes_exceeding_recipes(self, sample_recipe_df):
+        filtered_df = filter_by_cooking_time(sample_recipe_df, "Up to 15 minutes")
+        assert all(m <= 15 for m in filtered_df["minutes"])
+        # Ensure recipes with cooking time > 15 are excluded from recommendations
+        cleaned = parse_ingredients("chicken, curry powder")
+        recs = rank_recipes(cleaned, filtered_df, top_n=5)
+        # Medium Curry requires 30 mins, so it should not appear in filtered results
+        assert not any(r.title == "Medium Curry" for r in recs)

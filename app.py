@@ -10,6 +10,7 @@ Run with:
 from __future__ import annotations
 
 import ast
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,8 @@ import streamlit as st
 from src.data_loader import get_data_dir, load_csv, validate_foodcom_columns
 from src.preprocessing import clean_ingredient_list
 from src.recommender import Recipe, rank_recipes
+
+logger = logging.getLogger(__name__)
 
 # ── Page configuration ────────────────────────────────────────────────────────
 st.set_page_config(
@@ -263,9 +266,12 @@ if find_clicked:
         recipes_df, load_err = load_recipe_catalog()
 
         if load_err:
-            st.warning(load_err)
+            st.error(load_err)
         elif recipes_df is None or recipes_df.empty:
-            st.warning("Recipe dataset is empty or not available.")
+            st.error(
+                "Recipe dataset could not be loaded or is empty. "
+                "Please verify that `data/raw/RAW_recipes.csv` is present and valid."
+            )
         else:
             time_label = cooking_time if cooking_time != "Any cooking time" else "any duration"
             st.info(
@@ -279,7 +285,10 @@ if find_clicked:
                 filtered_df = filter_by_cooking_time(recipes_df, cooking_time)
 
                 if filtered_df.empty:
-                    st.info("No recipes found within this cooking-time limit.")
+                    st.info(
+                        "No matching recipes found. "
+                        "Try adding more ingredients or increasing your cooking-time limit."
+                    )
                 else:
                     recommendations = rank_recipes(
                         user_ingredients=cleaned_ingredients,
@@ -290,7 +299,10 @@ if find_clicked:
                     matched_recs = [r for r in recommendations if r.match_percentage > 0.0]
 
                     if not matched_recs:
-                        st.info("No recipes found matching your ingredients within this cooking-time limit.")
+                        st.info(
+                            "No matching recipes found. "
+                            "Try adding more ingredients or increasing your cooking-time limit."
+                        )
                     else:
                         st.markdown(
                             f"**Top {len(matched_recs)} recommended recipe(s) based on your ingredients:**"
@@ -298,7 +310,8 @@ if find_clicked:
                         for rec in matched_recs:
                             render_recipe_card(rec)
 
-            except Exception:
+            except Exception as exc:
+                logger.error("Error during recipe recommendation: %s", exc, exc_info=True)
                 st.error("An unexpected error occurred while generating recommendations. Please try again.")
 else:
     st.markdown(
