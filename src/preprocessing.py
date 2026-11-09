@@ -14,6 +14,8 @@ Public API
                                    Food.com ``ingredients`` column).
 - :func:`parse_ingredient_list`  – split a delimited string then clean each part.
 - :func:`preprocess_dataframe`   – apply cleaning to a DataFrame column.
+- :func:`classify_dietary`       – classify a recipe row as 'vegetarian',
+                                   'non-vegetarian', or 'uncertain'.
 """
 
 from __future__ import annotations
@@ -145,3 +147,219 @@ def preprocess_dataframe(df: pd.DataFrame, ingredient_col: str = "ingredients") 
     out = df.copy()
     out["ingredients_clean"] = out[ingredient_col].apply(_process_cell)
     return out
+
+
+# ── Dietary classification ─────────────────────────────────────────────────────
+
+#: Food.com tag substrings that reliably indicate a non-vegetarian recipe.
+_NONVEG_TAGS: frozenset[str] = frozenset(
+    {
+        "beef",
+        "pork",
+        "chicken",
+        "turkey",
+        "lamb",
+        "bacon",
+        "ham",
+        "fish",
+        "seafood",
+        "shellfish",
+        "shrimp",
+        "crab",
+        "lobster",
+        "poultry",
+        "meat",
+        "duck",
+        "venison",
+        "goat",
+        "bison",
+        "veal",
+        "anchovies",
+        "tuna",
+        "salmon",
+        "sardines",
+    }
+)
+
+#: Ingredient keyword substrings that indicate a non-vegetarian recipe.
+#: Words are matched as substrings of lowercased ingredient tokens.
+_NONVEG_INGREDIENT_KEYWORDS: tuple[str, ...] = (
+    "beef",
+    "chicken",
+    "pork",
+    "bacon",
+    "ham",
+    "turkey",
+    "lamb",
+    "salmon",
+    "tuna",
+    "shrimp",
+    "crab",
+    "lobster",
+    "anchov",
+    "sardine",
+    "clam",
+    "mussel",
+    "oyster",
+    "scallop",
+    "squid",
+    "fish sauce",
+    "worcestershire",  # traditionally contains anchovies
+    "lard",
+    "gelatin",
+    "duck",
+    "venison",
+    "pepperoni",
+    "salami",
+    "prosciutto",
+    "sausage",
+    "chorizo",
+    "meatball",
+    "ground meat",
+    "minced meat",
+    "veal",
+    "bison",
+)
+
+
+def classify_dietary(
+    tags: list[str] | str | None,
+    ingredients: list[str] | str | None,
+) -> str:
+    """Classify a recipe as 'vegetarian', 'non-vegetarian', or 'uncertain'.
+
+    Classification logic (conservative — avoids false vegetarian labels):
+
+    1. If the ``tags`` column is available and contains a recognised non-vegetarian
+       tag, the recipe is classified as **'non-vegetarian'**.
+    2. If ``tags`` contains the ``'vegetarian'`` tag *and* no non-vegetarian tags
+       are present, it is classified as **'vegetarian'**.
+    3. If ``ingredients`` contains any non-vegetarian keyword, the recipe is
+       classified as **'non-vegetarian'**.
+    4. If none of the above match, the recipe is classified as **'uncertain'**
+       rather than 'vegetarian', to avoid incorrect labelling.
+
+    Parameters
+    ----------
+    tags:
+        Recipe tags — either a Python list or a stringified list from the
+        Food.com ``tags`` column.  ``None`` or empty is handled safely.
+    ingredients:
+        Recipe ingredients — list or stringified list.  ``None`` or empty is
+        handled safely.
+
+    Returns
+    -------
+    str
+        One of ``'vegetarian'``, ``'non-vegetarian'``, or ``'uncertain'``.
+    """
+    # ── Parse tags ────────────────────────────────────────────────────────────
+    parsed_tags: list[str] = []
+    if tags is not None:
+        if isinstance(tags, list):
+            parsed_tags = [str(t).strip().lower() for t in tags if t]
+        elif isinstance(tags, str):
+            stripped = tags.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    result = ast.literal_eval(stripped)
+                    if isinstance(result, list):
+                        parsed_tags = [str(t).strip().lower() for t in result if t]
+                except (ValueError, SyntaxError):
+                    pass
+            elif stripped:
+                parsed_tags = [stripped.lower()]
+
+    tag_set: set[str] = set(parsed_tags)
+
+    # ── Check non-veg tags ────────────────────────────────────────────────────
+    if tag_set & _NONVEG_TAGS:
+        return "non-vegetarian"
+
+    # ── Check vegetarian tag (only if no non-veg tags matched) ────────────────
+    has_veg_tag = "vegetarian" in tag_set
+
+    # ── Parse ingredients ─────────────────────────────────────────────────────
+    parsed_ingredients: list[str] = []
+    if ingredients is not None:
+        if isinstance(ingredients, list):
+            parsed_ingredients = [str(i).strip().lower() for i in ingredients if i]
+        elif isinstance(ingredients, str):
+            stripped = ingredients.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    result = ast.literal_eval(stripped)
+                    if isinstance(result, list):
+                        parsed_ingredients = [str(i).strip().lower() for i in result if i]
+                except (ValueError, SyntaxError):
+                    pass
+            elif stripped:
+                parsed_ingredients = [stripped.lower()]
+
+    combined_text = " ".join(parsed_ingredients)
+
+    # ── Check non-veg ingredient keywords ────────────────────────────────────
+    for keyword in _NONVEG_INGREDIENT_KEYWORDS:
+        if keyword in combined_text:
+            return "non-vegetarian"
+
+    # ── Resolve classification ────────────────────────────────────────────────
+    if has_veg_tag:
+        return "vegetarian"
+
+    # No positive vegetarian signal — classify as uncertain rather than
+    # assuming vegetarian (conservative approach).
+    return "uncertain"
+
+
+
+def filter_by_dietary(df: "pd.DataFrame", preference: str) -> "pd.DataFrame":
+    """Filter a recipe DataFrame by dietary preference.
+
+    Uses :func:`classify_dietary` on each row's tags and ingredients.
+    Classification results:
+
+    - ``'vegetarian'``: recipe has the vegetarian tag, no non-veg tags/ingredients.
+    - ``'non-vegetarian'``: recipe has meat/poultry/seafood tags or ingredients.
+    - ``'uncertain'``: classification could not be determined confidently.
+
+    Parameters
+    ----------
+    df:
+        Recipe DataFrame with at least ``'tags'`` and/or ``'ingredients'`` columns.
+    preference:
+        One of ``'Any'``, ``'Vegetarian'``, ``'Non-vegetarian'``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Filtered DataFrame.  When *preference* is ``'Any'`` or columns are
+        missing, the original DataFrame is returned unchanged.
+
+    Notes
+    -----
+    Recipes with uncertain classification are excluded from both 'Vegetarian'
+    and 'Non-vegetarian' filters (conservative approach).
+    """
+    if df is None or df.empty or preference == "Any":
+        return df
+
+    has_tags = "tags" in df.columns
+    has_ingredients = "ingredients" in df.columns
+
+    if not has_tags and not has_ingredients:
+        # Cannot classify without either column; return unchanged.
+        return df
+
+    tags_col = df["tags"].tolist() if has_tags else [None] * len(df)
+    ings_col = df["ingredients"].tolist() if has_ingredients else [None] * len(df)
+
+    classifications = [
+        classify_dietary(t, i)
+        for t, i in zip(tags_col, ings_col)
+    ]
+
+    target = "vegetarian" if preference == "Vegetarian" else "non-vegetarian"
+    import numpy as np
+    bool_mask = np.array([c == target for c in classifications], dtype=bool)
+    return df.iloc[np.where(bool_mask)[0]].reset_index(drop=True)

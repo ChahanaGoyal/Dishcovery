@@ -17,7 +17,7 @@ import pandas as pd
 import streamlit as st
 
 from src.data_loader import get_data_dir, load_csv, validate_foodcom_columns
-from src.preprocessing import clean_ingredient_list
+from src.preprocessing import clean_ingredient_list, classify_dietary, filter_by_dietary
 from src.recommender import Recipe, rank_recipes, rank_recipes_tfidf
 
 logger = logging.getLogger(__name__)
@@ -103,20 +103,35 @@ cooking_time = st.selectbox(
     help="Filter recipes by how long they take to prepare.",
 )
 
-# ── Recommendation method selector ───────────────────────────────────────────
-st.markdown('<div class="section-header">🤖 Recommendation method</div>', unsafe_allow_html=True)
+# ── Dietary preference selector ────────────────────────────────────────────────
+st.markdown('<div class="section-header">🥗 Dietary Preference</div>', unsafe_allow_html=True)
 
-rec_method = st.radio(
-    label="Recommendation method",
-    options=["Baseline (Ingredient Overlap)", "Improved (TF-IDF Similarity)"],
+dietary_pref = st.radio(
+    label="Dietary preference",
+    options=["Any", "Vegetarian", "Non-vegetarian"],
     index=0,
     horizontal=True,
     label_visibility="collapsed",
     help=(
-        "Baseline counts how many recipe ingredients you have. "
-        "TF-IDF uses text similarity to find recipes whose ingredient profiles are closest to yours."
+        "Any: show all recipes. "
+        "Vegetarian: show only recipes with no meat, poultry, or seafood. "
+        "Non-vegetarian: show only recipes containing meat, poultry, or seafood."
     ),
 )
+
+# ── Advanced recommendation settings (collapsed) ─────────────────────────────
+with st.expander("Advanced Recommendation Settings", expanded=False):
+    rec_method = st.radio(
+        label="Recommendation method",
+        options=["Baseline (Ingredient Overlap)", "Improved (TF-IDF Similarity)"],
+        index=0,
+        horizontal=True,
+        help=(
+            "Baseline counts how many recipe ingredients you have. "
+            "TF-IDF uses text similarity to find recipes whose ingredient profiles are closest to yours. "
+            "Most users do not need to change this."
+        ),
+    )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -295,12 +310,14 @@ if find_clicked:
                 f"**Searching with ingredients ({len(cleaned_ingredients)}):** "
                 + ", ".join(f"`{i}`" for i in cleaned_ingredients)
                 + f" &nbsp;·&nbsp; **Max cooking time:** {time_label}"
+                + f" &nbsp;·&nbsp; **Diet:** {dietary_pref}"
                 + f" &nbsp;·&nbsp; **Method:** {method_label}",
                 icon="🔍",
             )
 
             try:
                 filtered_df = filter_by_cooking_time(recipes_df, cooking_time)
+                filtered_df = filter_by_dietary(filtered_df, dietary_pref)
 
                 if filtered_df.empty:
                     st.info(
@@ -360,9 +377,11 @@ if load_err:
     st.warning(load_err)
 elif recipes_df is not None and not recipes_df.empty:
     filtered_recipes = filter_by_cooking_time(recipes_df, cooking_time)
+    filtered_recipes = filter_by_dietary(filtered_recipes, dietary_pref)
 
     st.caption(
         f"Showing up to 5 sample recipes from the dataset matching: **{cooking_time}** "
+        f"· **{dietary_pref}** diet "
         f"({len(filtered_recipes)} matching in catalog)."
     )
 
