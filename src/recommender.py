@@ -496,7 +496,7 @@ def rank_recipes_tfidf(
 
     # Fit TF-IDF on recipe corpus, then transform user query
     try:
-        vectorizer = TfidfVectorizer(token_pattern=r"[a-z][a-z ]+")
+        vectorizer = TfidfVectorizer(token_pattern=r"(?u)\b[a-zA-Z]{2,}\b")
         recipe_matrix = vectorizer.fit_transform(recipe_texts)
         user_vector = vectorizer.transform([user_text])
     except ValueError as exc:

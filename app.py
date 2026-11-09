@@ -6,12 +6,13 @@ Entry point for the Dishcovery web app.
 Run with:
     streamlit run app.py
 
-Prompt 3 additions (on top of Anshika's UI polish base):
+Features:
+  - Clean, user-friendly recipe search from kitchen ingredients.
+  - Automatic TF-IDF cosine similarity recommendation engine.
   - Dietary Preference selector (Any / Vegetarian / Non-vegetarian).
-  - Sort order selector (Best match first / Shortest cooking time first).
-  - Ingredient example suggestion below the input box.
-  - Improved empty-input and no-results messages with actionable hints.
-  - Score label clearly distinguishes Baseline Match % from TF-IDF Similarity %.
+  - Maximum cooking-time selector.
+  - Sort results by Best match or Shortest cooking time.
+  - Search results persist across Streamlit reruns via session state.
 """
 
 from __future__ import annotations
@@ -207,7 +208,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Controls row: cooking time + dietary + method ─────────────────────────────
+# ── Controls row: cooking time + dietary ─────────────────────────────────────
 col_time, col_diet = st.columns([1, 1], gap="large")
 
 with col_time:
@@ -235,35 +236,6 @@ with col_diet:
         ),
     )
 
-# ── Advanced settings (collapsed): algorithm + sort ───────────────────────────
-with st.expander("Advanced Recommendation Settings", expanded=False):
-    adv_col1, adv_col2 = st.columns([1, 1], gap="large")
-    with adv_col1:
-        st.markdown('<div class="section-label">🤖 Recommendation method</div>', unsafe_allow_html=True)
-        rec_method = st.radio(
-            label="Recommendation method",
-            options=["Baseline (Ingredient Overlap)", "Improved (TF-IDF Similarity)"],
-            index=0,
-            horizontal=False,
-            help=(
-                "Baseline counts how many recipe ingredients you have. "
-                "TF-IDF uses text similarity to find recipes whose ingredient profiles are closest to yours. "
-                "Most users do not need to change this."
-            ),
-        )
-    with adv_col2:
-        st.markdown('<div class="section-label">↕️ Sort results by</div>', unsafe_allow_html=True)
-        sort_order = st.radio(
-            label="Sort results by",
-            options=["Best match first", "Shortest cooking time first"],
-            index=0,
-            horizontal=False,
-            help=(
-                "Best match first: highest match/similarity score at the top. "
-                "Shortest cooking time first: fastest recipes at the top (same score = faster first)."
-            ),
-        )
-
 st.markdown("<br>", unsafe_allow_html=True)
 
 col1, col2, col3 = st.columns([1.5, 1, 1.5])
@@ -288,10 +260,10 @@ def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
         return None, f"Error loading recipe dataset: {exc}"
 
 
-def render_recipe_card(recipe: Recipe, score_label: str = "Match") -> None:
+def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
     """Render a single recipe recommendation card using styled HTML.
 
-    Uses distinct colours for Match % (Baseline) vs Similarity % (TF-IDF)
+    Uses distinct colours for Match/Relevance % vs Similarity %
     so users are never confused about which score they are seeing.
     """
     title_str = (
@@ -304,9 +276,12 @@ def render_recipe_card(recipe: Recipe, score_label: str = "Match") -> None:
         if recipe.cooking_time is not None
         else "⏱️ Time not specified"
     )
-    match_pct = round(recipe.match_percentage, 1)
+    if recipe.similarity_score is not None and recipe.similarity_score > 0.0:
+        match_pct = round(recipe.similarity_score * 100.0, 1)
+    else:
+        match_pct = round(recipe.match_percentage, 1)
 
-    # Score label class: amber for Match (Baseline), cyan for Similarity (TF-IDF)
+    # Score label class: amber for Match/Relevance, cyan for Similarity
     score_css_class = (
         "recipe-score-similarity" if score_label == "Similarity" else "recipe-score-match"
     )
@@ -357,110 +332,143 @@ def render_recipe_card(recipe: Recipe, score_label: str = "Match") -> None:
 
 # ── Result area ───────────────────────────────────────────────────────────────
 st.divider()
-st.markdown('<div class="results-heading">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
 
 if find_clicked:
     cleaned_ingredients = parse_ingredients(ingredient_input)
 
     if not cleaned_ingredients:
-        st.warning(
-            "⚠️ **No ingredients entered.** "
-            "Please type at least one ingredient in the box above, then click **✨ Find Recipes**. "
-            "\n\n💡 *Example: tomato, garlic, pasta, olive oil*"
-        )
+        st.session_state["search_state"] = "empty_input"
+        st.session_state["recommendations"] = []
     else:
         recipes_df, load_err = load_recipe_catalog()
 
         if load_err:
-            st.error(load_err)
+            st.session_state["search_state"] = "error"
+            st.session_state["search_error_msg"] = load_err
+            st.session_state["recommendations"] = []
         elif recipes_df is None or recipes_df.empty:
-            st.error(
+            st.session_state["search_state"] = "error"
+            st.session_state["search_error_msg"] = (
                 "Recipe dataset could not be loaded or is empty. "
                 "Please verify that `data/raw/RAW_recipes.csv` is present and valid."
             )
+            st.session_state["recommendations"] = []
         else:
-            use_tfidf = rec_method.startswith("Improved")
-            method_label = "TF-IDF Similarity" if use_tfidf else "Ingredient Overlap"
-            time_label = cooking_time if cooking_time != "Any cooking time" else "any duration"
-
-            st.info(
-                f"**Searching with ingredients ({len(cleaned_ingredients)}):** "
-                + ", ".join(f"`{i}`" for i in cleaned_ingredients)
-                + f" &nbsp;·&nbsp; **Max time:** {time_label}"
-                + f" &nbsp;·&nbsp; **Diet:** {dietary_pref}"
-                + f" &nbsp;·&nbsp; **Method:** {method_label}"
-                + f" &nbsp;·&nbsp; **Sort:** {sort_order}",
-                icon="🔍",
-            )
-
             try:
                 filtered_df = filter_by_cooking_time(recipes_df, cooking_time)
                 filtered_df = filter_by_dietary(filtered_df, dietary_pref)
 
                 if filtered_df.empty:
-                    st.info(
-                        "🔍 **No recipes matched your filters.**\n\n"
-                        "Try one of these:\n"
-                        "- Add more ingredients\n"
-                        "- Change the cooking time to a longer limit\n"
-                        "- Switch dietary preference to **Any**"
-                    )
+                    st.session_state["search_state"] = "no_filter_matches"
+                    st.session_state["recommendations"] = []
                 else:
-                    if use_tfidf:
-                        recommendations = rank_recipes_tfidf(
-                            user_ingredients=cleaned_ingredients,
-                            df=filtered_df,
-                            top_n=10,
-                        )
-                        score_label = "Similarity"
-                    else:
-                        recommendations = rank_recipes(
-                            user_ingredients=cleaned_ingredients,
-                            df=filtered_df,
-                            top_n=10,
-                            min_match=0.0,
-                        )
-                        score_label = "Match"
-
-                    matched_recs = [r for r in recommendations if r.match_percentage > 0.0]
+                    recommendations = rank_recipes_tfidf(
+                        user_ingredients=cleaned_ingredients,
+                        df=filtered_df,
+                        top_n=20,
+                    )
+                    matched_recs = [
+                        r
+                        for r in recommendations
+                        if (r.similarity_score is not None and r.similarity_score > 0.0)
+                        or (r.score is not None and r.score > 0.0)
+                    ]
 
                     if not matched_recs:
-                        st.info(
-                            "🔍 **No recipes matched your ingredients.**\n\n"
-                            "Try one of these:\n"
-                            "- Add more ingredients (e.g. common pantry items like oil, salt, garlic)\n"
-                            "- Change the cooking time to a longer limit\n"
-                            "- Switch dietary preference to **Any**\n"
-                            "- Try the **TF-IDF Similarity** method in Advanced Settings"
-                        )
+                        st.session_state["search_state"] = "no_ingredient_matches"
+                        st.session_state["recommendations"] = []
                     else:
-                        # Apply sort order
-                        sorted_recs = sort_recommendations(matched_recs, sort_order)[:5]
+                        st.session_state["search_state"] = "has_results"
+                        st.session_state["recommendations"] = matched_recs
 
-                        sort_note = (
-                            "⏱️ sorted by cooking time"
-                            if sort_order == "Shortest cooking time first"
-                            else "🎯 sorted by best match"
-                        )
-                        st.markdown(
-                            f"**Top {len(sorted_recs)} recipe(s) — {method_label} · {sort_note}:**"
-                        )
-                        for rec in sorted_recs:
-                            render_recipe_card(rec, score_label=score_label)
-
+                st.session_state["search_ingredients"] = cleaned_ingredients
+                st.session_state["search_cooking_time"] = cooking_time
+                st.session_state["search_dietary_pref"] = dietary_pref
             except Exception as exc:
                 logger.error("Error during recipe recommendation: %s", exc, exc_info=True)
-                st.error(
+                st.session_state["search_state"] = "error"
+                st.session_state["search_error_msg"] = (
                     "Something went wrong while searching for recipes. "
                     "Please try again or adjust your filters."
                 )
-else:
+                st.session_state["recommendations"] = []
+
+# Render results from session state
+search_state = st.session_state.get("search_state")
+
+if search_state is None:
+    st.markdown('<div class="results-heading">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
     st.markdown(
         "<p style='color:#6B7280; font-style:italic; margin-top:0.5rem;'>"
         "Enter your ingredients above and click <strong>✨ Find Recipes</strong> to discover matching dishes."
         "</p>",
         unsafe_allow_html=True,
     )
+elif search_state == "empty_input":
+    st.markdown('<div class="results-heading">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
+    st.warning(
+        "⚠️ **No ingredients entered.** "
+        "Please type at least one ingredient in the box above, then click **✨ Find Recipes**. "
+        "\n\n💡 *Example: tomato, garlic, pasta, olive oil*"
+    )
+elif search_state == "error":
+    st.markdown('<div class="results-heading">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
+    st.error(st.session_state.get("search_error_msg", "An unexpected error occurred."))
+elif search_state == "no_filter_matches":
+    st.markdown('<div class="results-heading">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
+    st.info(
+        "🔍 **No recipes matched your filters.**\n\n"
+        "Try one of these:\n"
+        "- Add more ingredients\n"
+        "- Change the cooking time to a longer limit\n"
+        "- Switch dietary preference to **Any**"
+    )
+elif search_state == "no_ingredient_matches":
+    st.markdown('<div class="results-heading">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
+    st.info(
+        "🔍 **No recipes matched your ingredients.**\n\n"
+        "Try one of these:\n"
+        "- Add more ingredients (e.g. common pantry items like oil, salt, garlic)\n"
+        "- Change the cooking time to a longer limit\n"
+        "- Switch dietary preference to **Any**"
+    )
+elif search_state == "has_results":
+    recs = st.session_state.get("recommendations", [])
+    search_ings = st.session_state.get("search_ingredients", [])
+    search_time = st.session_state.get("search_cooking_time", cooking_time)
+    search_diet = st.session_state.get("search_dietary_pref", dietary_pref)
+    time_label = search_time if search_time != "Any cooking time" else "any duration"
+
+    res_col1, res_col2 = st.columns([1.6, 1.4], gap="medium")
+    with res_col1:
+        st.markdown('<div class="results-heading">📋 Recipe Recommendations</div>', unsafe_allow_html=True)
+    with res_col2:
+        sort_order = st.selectbox(
+            label="Sort results by",
+            options=["Best match first", "Shortest cooking time first"],
+            index=0,
+            key="sort_order_select",
+            label_visibility="collapsed",
+            help="Choose whether to sort by best match percentage or shortest cooking time.",
+        )
+
+    st.info(
+        f"**Ingredients ({len(search_ings)}):** "
+        + ", ".join(f"`{i}`" for i in search_ings)
+        + f" &nbsp;·&nbsp; **Max time:** {time_label}"
+        + f" &nbsp;·&nbsp; **Diet:** {search_diet}",
+        icon="🔍",
+    )
+
+    sorted_recs = sort_recommendations(recs, sort_order)[:5]
+    sort_note = (
+        "⏱️ fastest first"
+        if sort_order == "Shortest cooking time first"
+        else "🎯 best match first"
+    )
+    st.markdown(f"**Top {len(sorted_recs)} recommended recipe(s) ({sort_note}):**")
+    for rec in sorted_recs:
+        render_recipe_card(rec, score_label="Relevance")
 
 # ── Recipe Catalog Preview (collapsed by default) ─────────────────────────────
 st.markdown("<br>", unsafe_allow_html=True)
@@ -524,7 +532,7 @@ with st.expander("🍲 Browse Recipe Catalog", expanded=False):
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown(
     "<div class='dishcovery-footer'>"
-    "Dishcovery &nbsp;·&nbsp; Baseline ingredient matching &amp; TF-IDF similarity"
+    "Dishcovery &nbsp;·&nbsp; Turn ingredients into meals"
     "&nbsp;·&nbsp; Built with Streamlit &amp; ❤️"
     "</div>",
     unsafe_allow_html=True,
