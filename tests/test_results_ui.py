@@ -252,6 +252,125 @@ class TestRecipeCardRendering:
             render_recipe_card(rec_untimed, score_label="Match")
             assert "Time not specified" in mock_markdown.call_args[0][0]
 
+    def test_recipe_card_with_all_ingredients_available(self):
+        rec = Recipe(
+            recipe_id="all_avail",
+            title="Pancake",
+            match_percentage=100.0,
+            matched_ingredients=["flour", "milk", "egg"],
+            missing_ingredients=[],
+            cooking_time=15,
+        )
+        with patch("app.st.markdown") as mock_markdown:
+            render_recipe_card(rec, score_label="Relevance")
+            html_text = mock_markdown.call_args[0][0]
+            kwargs = mock_markdown.call_args[1]
+
+            assert kwargs.get("unsafe_allow_html") is True
+            assert "ing-all" in html_text
+            assert "You have all the listed ingredients!" in html_text
+            assert "ing-miss" not in html_text
+            assert "Still need" not in html_text
+
+    def test_recipe_card_with_some_missing_ingredients(self):
+        rec = Recipe(
+            recipe_id="some_miss",
+            title="Tomato Pasta",
+            match_percentage=60.0,
+            matched_ingredients=["pasta", "tomato"],
+            missing_ingredients=["garlic", "basil"],
+            cooking_time=20,
+        )
+        with patch("app.st.markdown") as mock_markdown:
+            render_recipe_card(rec, score_label="Relevance")
+            html_text = mock_markdown.call_args[0][0]
+
+            assert "ing-have" in html_text
+            assert "You have (2):" in html_text
+            assert "pasta, tomato" in html_text
+
+            assert "ing-miss" in html_text
+            assert "Still need (2):" in html_text
+            assert "garlic, basil" in html_text
+            assert "ing-all" not in html_text
+
+    def test_recipe_card_with_only_one_missing_ingredient(self):
+        rec = Recipe(
+            recipe_id="one_miss",
+            title="Garlic Bread",
+            match_percentage=75.0,
+            matched_ingredients=["bread", "butter", "parsley"],
+            missing_ingredients=["garlic"],
+            cooking_time=10,
+        )
+        with patch("app.st.markdown") as mock_markdown:
+            render_recipe_card(rec, score_label="Relevance")
+            html_text = mock_markdown.call_args[0][0]
+
+            assert "ing-have" in html_text
+            assert "You have (3):" in html_text
+            assert "ing-miss" in html_text
+            assert "Still need (1):" in html_text
+            assert "garlic" in html_text
+
+    def test_recipe_card_with_several_missing_ingredients(self):
+        rec = Recipe(
+            recipe_id="several_miss",
+            title="Complex Curry",
+            match_percentage=25.0,
+            matched_ingredients=["rice"],
+            missing_ingredients=["curry powder", "coconut milk", "onion", "chicken", "ginger"],
+            cooking_time=45,
+        )
+        with patch("app.st.markdown") as mock_markdown:
+            render_recipe_card(rec, score_label="Relevance")
+            html_text = mock_markdown.call_args[0][0]
+
+            assert "ing-have" in html_text
+            assert "You have (1):" in html_text
+            assert "ing-miss" in html_text
+            assert "Still need (5):" in html_text
+            assert "curry powder, coconut milk, onion, chicken, ginger" in html_text
+
+    def test_recipe_card_no_leading_indentation_to_prevent_code_block(self):
+        rec = Recipe(
+            recipe_id="no_indent",
+            title="Simple Salad",
+            match_percentage=50.0,
+            matched_ingredients=["lettuce"],
+            missing_ingredients=["cucumber"],
+            cooking_time=5,
+        )
+        with patch("app.st.markdown") as mock_markdown:
+            render_recipe_card(rec, score_label="Relevance")
+            html_text = mock_markdown.call_args[0][0]
+
+            # In CommonMark, lines with 4 or more leading spaces become indented code blocks.
+            # Every line must have 0 leading spaces.
+            for line in html_text.splitlines():
+                if line.strip():
+                    assert not line.startswith("    "), (
+                        f"Line has 4 or more leading spaces which causes raw HTML code blocks: {line!r}"
+                    )
+
+    def test_recipe_card_escapes_html_in_title_and_ingredients(self):
+        rec = Recipe(
+            recipe_id="xss_test",
+            title="Dangerous <script>alert('xss')</script> Dish",
+            match_percentage=50.0,
+            matched_ingredients=["onion & garlic"],
+            missing_ingredients=["peppers <spicy>"],
+            cooking_time=15,
+        )
+        with patch("app.st.markdown") as mock_markdown:
+            render_recipe_card(rec, score_label="Relevance")
+            html_text = mock_markdown.call_args[0][0]
+
+            assert "<script>" not in html_text.lower()
+            assert "&lt;script&gt;" in html_text.lower()
+            assert "onion &amp; garlic" in html_text
+            assert "&lt;spicy&gt;" in html_text
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Empty Input & Validation Tests

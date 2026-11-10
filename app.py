@@ -18,6 +18,7 @@ Features:
 from __future__ import annotations
 
 import ast
+import html
 import logging
 from pathlib import Path
 
@@ -295,17 +296,24 @@ def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
 
     Uses distinct colours for Match/Relevance % vs Similarity %
     so users are never confused about which score they are seeing.
+    All user and recipe strings are safely HTML-escaped to prevent injection.
+    Lines contain zero indentation to prevent markdown parsers from treating
+    the HTML as an indented code block.
     """
-    title_str = (
+    raw_title = (
         str(recipe.title).title()
         if recipe.title and str(recipe.title).strip()
         else "Untitled Recipe"
     )
+    safe_title = html.escape(raw_title)
+
     time_str = (
         f"⏱️ {recipe.cooking_time} mins"
         if recipe.cooking_time is not None
         else "⏱️ Time not specified"
     )
+    safe_time = html.escape(time_str)
+
     if recipe.similarity_score is not None and recipe.similarity_score > 0.0:
         match_pct = round(recipe.similarity_score * 100.0, 1)
     else:
@@ -316,11 +324,16 @@ def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
         "recipe-score-similarity" if score_label == "Similarity" else "recipe-score-match"
     )
     score_icon = "🔵" if score_label == "Similarity" else "🎯"
+    safe_score_label = html.escape(score_label)
 
     total_req = recipe.matched_ingredients + recipe.missing_ingredients
+    safe_total_req = [html.escape(str(x)) for x in total_req]
+    safe_matched = [html.escape(str(x)) for x in recipe.matched_ingredients]
+    safe_missing = [html.escape(str(x)) for x in recipe.missing_ingredients]
+
     req_html = (
         f'<div class="ing-row"><span class="ing-label">📋 Ingredients needed:</span> '
-        f'{", ".join(total_req)}</div>'
+        f'{", ".join(safe_total_req)}</div>\n'
         if total_req
         else ""
     )
@@ -329,7 +342,7 @@ def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
         have_html = (
             f'<div class="ing-row ing-have"><span class="ing-label">'
             f'✅ You have ({len(recipe.matched_ingredients)}):</span> '
-            f'{", ".join(recipe.matched_ingredients)}</div>'
+            f'{", ".join(safe_matched)}</div>\n'
         )
     else:
         have_html = ""
@@ -338,26 +351,25 @@ def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
         miss_html = (
             f'<div class="ing-row ing-miss"><span class="ing-label">'
             f'🛒 Still need ({len(recipe.missing_ingredients)}):</span> '
-            f'{", ".join(recipe.missing_ingredients)}</div>'
+            f'{", ".join(safe_missing)}</div>\n'
         )
     else:
-        miss_html = '<div class="ing-row ing-all">🎉 You have all the listed ingredients!</div>'
+        miss_html = '<div class="ing-row ing-all">🎉 You have all the listed ingredients!</div>\n'
 
-    st.markdown(
-        f"""
-        <div class="recipe-card">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                <div class="recipe-title">🍽️ {title_str}</div>
-                <div class="{score_css_class}">{score_icon} {score_label}: {match_pct}%</div>
-            </div>
-            <div class="recipe-meta">{time_str}</div>
-            {req_html}
-            {have_html}
-            {miss_html}
-        </div>
-        """,
-        unsafe_allow_html=True,
+    card_html = (
+        f'<div class="recipe-card">\n'
+        f'<div style="display:flex; justify-content:space-between; align-items:flex-start;">\n'
+        f'<div class="recipe-title">🍽️ {safe_title}</div>\n'
+        f'<div class="{score_css_class}">{score_icon} {safe_score_label}: {match_pct}%</div>\n'
+        f'</div>\n'
+        f'<div class="recipe-meta">{safe_time}</div>\n'
+        f'{req_html}'
+        f'{have_html}'
+        f'{miss_html}'
+        f'</div>'
     )
+
+    st.markdown(card_html, unsafe_allow_html=True)
 
 
 # ── Result area ───────────────────────────────────────────────────────────────
@@ -585,18 +597,21 @@ with st.expander("🍲 Browse Recipe Catalog", expanded=False):
 
                 ing_str = format_recipe_ingredients(row.get("ingredients"))
 
-                st.markdown(
-                    f"""
-                    <div class="catalog-card">
-                        <div class="catalog-title">🍽️ {recipe_title}
-                            <span style="font-weight:400; color:#9CA3AF; font-size:0.82rem;">
-                            &nbsp;· ⏱️ {time_str}</span>
-                        </div>
-                        <div class="catalog-meta"><strong>Ingredients:</strong> {ing_str}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+                safe_cat_title = html.escape(recipe_title)
+                safe_cat_time = html.escape(time_str)
+                safe_cat_ing = html.escape(ing_str)
+
+                catalog_html = (
+                    f'<div class="catalog-card">\n'
+                    f'<div class="catalog-title">🍽️ {safe_cat_title} '
+                    f'<span style="font-weight:400; color:#9CA3AF; font-size:0.82rem;">'
+                    f'&nbsp;· ⏱️ {safe_cat_time}</span>\n'
+                    f'</div>\n'
+                    f'<div class="catalog-meta"><strong>Ingredients:</strong> {safe_cat_ing}</div>\n'
+                    f'</div>'
                 )
+
+                st.markdown(catalog_html, unsafe_allow_html=True)
     else:
         st.info("Dataset not loaded — see setup instructions in the README.")
 
