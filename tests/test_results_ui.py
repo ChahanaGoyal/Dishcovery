@@ -31,13 +31,19 @@ from src.preprocessing import filter_by_dietary
 # Helper for creating Recipe instances
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_recipe(title: str, pct: float, cooking_time: int | None = None) -> Recipe:
+def _make_recipe(
+    title: str,
+    pct: float = 0.0,
+    cooking_time: int | None = None,
+    matched: list[str] | None = None,
+    missing: list[str] | None = None,
+) -> Recipe:
     return Recipe(
         recipe_id=title,
         title=title,
         match_percentage=pct,
-        matched_ingredients=["ingredient_a"],
-        missing_ingredients=[],
+        matched_ingredients=matched if matched is not None else ["ingredient_a"],
+        missing_ingredients=missing if missing is not None else [],
         cooking_time=cooking_time,
     )
 
@@ -47,30 +53,64 @@ def _make_recipe(title: str, pct: float, cooking_time: int | None = None) -> Rec
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestSortRecommendations:
-    """Unit tests for sort_recommendations()."""
+    """Unit tests for sort_recommendations() under Best Match First ranking rules."""
 
     def test_best_match_first_default(self):
+        # Prompt exact specification:
+        # Recipe A: 2 missing ingredients, 3 total ingredients.
+        # Recipe B: 3 missing ingredients, 5 total ingredients.
+        # Recipe C: 2 missing ingredients, 6 total ingredients.
+        # Expected ranking: Recipe A, Recipe C, Recipe B
         recs = [
-            _make_recipe("Recipe B", 60.0, 30),
-            _make_recipe("Recipe A", 90.0, 45),
-            _make_recipe("Recipe C", 75.0, 15),
+            _make_recipe("Recipe B", pct=40.0, matched=["m1", "m2"], missing=["x1", "x2", "x3"]),
+            _make_recipe("Recipe A", pct=33.3, matched=["m1"], missing=["x1", "x2"]),
+            _make_recipe("Recipe C", pct=66.7, matched=["m1", "m2", "m3", "m4"], missing=["x1", "x2"]),
         ]
         result = sort_recommendations(recs, "Best match first")
         assert [r.title for r in result] == ["Recipe A", "Recipe C", "Recipe B"]
 
+    def test_best_match_fewer_missing_ingredients_first(self):
+        recs = [
+            _make_recipe("Dish 3 Missing", missing=["a", "b", "c"], matched=["m1"]),
+            _make_recipe("Dish 1 Missing", missing=["a"], matched=["m1"]),
+            _make_recipe("Dish 2 Missing", missing=["a", "b"], matched=["m1"]),
+        ]
+        result = sort_recommendations(recs, "Best match first")
+        assert [r.title for r in result] == ["Dish 1 Missing", "Dish 2 Missing", "Dish 3 Missing"]
+
+    def test_best_match_equal_missing_fewer_total_first(self):
+        # Equal missing (2), but Dish Simple has total 3, Dish Complex has total 6
+        recs = [
+            _make_recipe("Dish Complex", missing=["a", "b"], matched=["m1", "m2", "m3", "m4"]),
+            _make_recipe("Dish Simple", missing=["a", "b"], matched=["m1"]),
+        ]
+        result = sort_recommendations(recs, "Best match first")
+        assert [r.title for r in result] == ["Dish Simple", "Dish Complex"]
+
+    def test_best_match_equal_missing_and_total_alphabetical(self):
+        # Equal missing (1) and equal total (3), tie-break alphabetically
+        recs = [
+            _make_recipe("Zucchini Dish", missing=["a"], matched=["m1", "m2"]),
+            _make_recipe("Apple Pie", missing=["a"], matched=["m1", "m2"]),
+            _make_recipe("Carrot Soup", missing=["a"], matched=["m1", "m2"]),
+        ]
+        result = sort_recommendations(recs, "Best match first")
+        assert [r.title for r in result] == ["Apple Pie", "Carrot Soup", "Zucchini Dish"]
+
     def test_shortest_cooking_time_first(self):
         recs = [
-            _make_recipe("Slow Dish", 90.0, 60),
-            _make_recipe("Fast Dish", 50.0, 10),
-            _make_recipe("Medium Dish", 70.0, 30),
+            _make_recipe("Slow Dish", pct=90.0, cooking_time=60),
+            _make_recipe("Fast Dish", pct=50.0, cooking_time=10),
+            _make_recipe("Medium Dish", pct=70.0, cooking_time=30),
         ]
         result = sort_recommendations(recs, "Shortest cooking time first")
         assert [r.title for r in result] == ["Fast Dish", "Medium Dish", "Slow Dish"]
 
-    def test_shortest_cooking_time_tie_break_by_match(self):
+    def test_shortest_cooking_time_tie_break_by_best_match(self):
+        # Both 20 mins: High Match has 0 missing, Low Match has 2 missing
         recs = [
-            _make_recipe("Low Match", 50.0, 20),
-            _make_recipe("High Match", 90.0, 20),
+            _make_recipe("Low Match", cooking_time=20, missing=["a", "b"], matched=["m1"]),
+            _make_recipe("High Match", cooking_time=20, missing=[], matched=["m1", "m2"]),
         ]
         result = sort_recommendations(recs, "Shortest cooking time first")
         assert result[0].title == "High Match"
@@ -78,17 +118,17 @@ class TestSortRecommendations:
 
     def test_no_cooking_time_placed_at_end(self):
         recs = [
-            _make_recipe("No Time Recipe", 95.0, None),
-            _make_recipe("Timed Recipe", 60.0, 15),
+            _make_recipe("No Time Recipe", cooking_time=None, missing=[]),
+            _make_recipe("Timed Recipe", cooking_time=15, missing=["a"]),
         ]
         result = sort_recommendations(recs, "Shortest cooking time first")
         assert result[0].title == "Timed Recipe"
         assert result[1].title == "No Time Recipe"
 
-    def test_all_no_cooking_time_sorts_by_match(self):
+    def test_all_no_cooking_time_sorts_by_best_match(self):
         recs = [
-            _make_recipe("Dish B", 60.0, None),
-            _make_recipe("Dish A", 90.0, None),
+            _make_recipe("Dish B", cooking_time=None, missing=["a", "b"]),
+            _make_recipe("Dish A", cooking_time=None, missing=["a"]),
         ]
         result = sort_recommendations(recs, "Shortest cooking time first")
         assert [r.title for r in result] == ["Dish A", "Dish B"]
@@ -98,14 +138,14 @@ class TestSortRecommendations:
         assert sort_recommendations([], "Shortest cooking time first") == []
 
     def test_single_item_returns_single_item(self):
-        recs = [_make_recipe("Only Dish", 55.0, 20)]
+        recs = [_make_recipe("Only Dish", pct=55.0, cooking_time=20)]
         assert sort_recommendations(recs, "Best match first")[0].title == "Only Dish"
         assert sort_recommendations(recs, "Shortest cooking time first")[0].title == "Only Dish"
 
     def test_scores_and_metrics_not_mutated(self):
         recs = [
-            _make_recipe("Dish A", 80.0, 30),
-            _make_recipe("Dish B", 60.0, 10),
+            _make_recipe("Dish A", pct=80.0, cooking_time=30),
+            _make_recipe("Dish B", pct=60.0, cooking_time=10),
         ]
         result = sort_recommendations(recs, "Shortest cooking time first")
         result_by_title = {r.title: r for r in result}

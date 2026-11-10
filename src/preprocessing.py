@@ -344,6 +344,10 @@ def filter_by_dietary(df: "pd.DataFrame", preference: str) -> "pd.DataFrame":
     if df is None or df.empty or preference == "Any":
         return df
 
+    target = "vegetarian" if preference == "Vegetarian" else "non-vegetarian"
+    if "dietary_class" in df.columns:
+        return df[df["dietary_class"] == target].reset_index(drop=True)
+
     has_tags = "tags" in df.columns
     has_ingredients = "ingredients" in df.columns
 
@@ -359,7 +363,6 @@ def filter_by_dietary(df: "pd.DataFrame", preference: str) -> "pd.DataFrame":
         for t, i in zip(tags_col, ings_col)
     ]
 
-    target = "vegetarian" if preference == "Vegetarian" else "non-vegetarian"
     import numpy as np
     bool_mask = np.array([c == target for c in classifications], dtype=bool)
     return df.iloc[np.where(bool_mask)[0]].reset_index(drop=True)

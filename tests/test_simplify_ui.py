@@ -176,7 +176,11 @@ def test_sorting_integration(sample_recipes_df: pd.DataFrame):
     # Best match first
     by_match = sort_recommendations(matched, "Best match first")
     for i in range(len(by_match) - 1):
-        assert by_match[i].match_percentage >= by_match[i + 1].match_percentage
+        r1, r2 = by_match[i], by_match[i + 1]
+        miss1, miss2 = len(r1.missing_ingredients), len(r2.missing_ingredients)
+        tot1 = len(r1.matched_ingredients) + len(r1.missing_ingredients)
+        tot2 = len(r2.matched_ingredients) + len(r2.missing_ingredients)
+        assert (miss1, tot1, (r1.title or "").lower()) <= (miss2, tot2, (r2.title or "").lower())
 
     # Shortest cooking time first
     by_time = sort_recommendations(matched, "Shortest cooking time first")

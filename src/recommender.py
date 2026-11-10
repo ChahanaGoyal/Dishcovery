@@ -395,10 +395,41 @@ class IngredientRecommender:
 # ── TF-IDF / Cosine Similarity Recommendation ────────────────────────────────
 
 
+def rank_by_best_match(recipes: list[Recipe]) -> list[Recipe]:
+    """Sort recipes following Best Match First priorities:
+    1. Fewer missing ingredients first.
+    2. If missing ingredient counts are equal, fewer total usable recipe ingredients first.
+    3. If both are equal, alphabetical order by recipe title (case-insensitive).
+
+    Parameters
+    ----------
+    recipes:
+        List of Recipe objects.
+
+    Returns
+    -------
+    list[Recipe]
+        A new sorted list of Recipe objects.
+    """
+    return sorted(
+        recipes,
+        key=lambda r: (
+            len(r.missing_ingredients),
+            len(r.matched_ingredients) + len(r.missing_ingredients),
+            (r.title or "").strip().lower(),
+            str(r.recipe_id),
+        ),
+    )
+
+
 def rank_recipes_tfidf(
     user_ingredients: list[str] | str | None,
     df: pd.DataFrame,
     top_n: int = 5,
+    vectorizer: TfidfVectorizer | None = None,
+    recipe_matrix: Any = None,
+    cleaned_ingredients: list[list[str]] | None = None,
+    ranking: str = "similarity",
 ) -> list[Recipe]:
     """Rank recipes using TF-IDF vectors and cosine similarity.
 
@@ -406,9 +437,8 @@ def rank_recipes_tfidf(
     TF-IDF representations, then ranks recipes by cosine similarity to the
     user's ingredient query.
 
-    **Score label:** The ``similarity_score`` field holds the raw cosine
-    similarity value in [0.0, 1.0]. It is *not* a match percentage — do not
-    display it as one.
+    Supports optional precomputed/cached TF-IDF vectorizer, sparse matrix,
+    and pre-cleaned ingredient lists for sub-second search speeds on large catalogs.
 
     Parameters
     ----------
@@ -421,15 +451,23 @@ def rank_recipes_tfidf(
         ('recipe_id', 'title', 'ingredients_clean', 'cooking_time').
     top_n:
         Maximum number of recipes to return (default: 5).
+    vectorizer:
+        Optional pre-fitted TfidfVectorizer instance.
+    recipe_matrix:
+        Optional precomputed sparse TF-IDF matrix for df.
+    cleaned_ingredients:
+        Optional pre-cleaned ingredient token lists corresponding to df rows.
+    ranking:
+        Ranking mode: ``'similarity'`` (default) or ``'best_match'``.
 
     Returns
     -------
     list[Recipe]
-        Recipes ranked by cosine similarity (highest first).
+        Recipes ranked by the chosen ranking method.
         Each Recipe has ``similarity_score`` populated and
         ``match_percentage`` set to ``similarity_score * 100``.
         The ``matched_ingredients`` and ``missing_ingredients`` fields
-        are computed using the same baseline overlap logic for transparency.
+        are computed using clean unique recipe ingredients.
     """
     if top_n <= 0 or df is None or df.empty:
         return []
@@ -455,7 +493,7 @@ def rank_recipes_tfidf(
     )
     time_col = "minutes" if "minutes" in df.columns else ("cooking_time" if "cooking_time" in df.columns else None)
 
-    if ing_col is None:
+    if ing_col is None and cleaned_ingredients is None:
         raise ValueError(
             "DataFrame must contain an ingredients column ('ingredients_clean' or 'ingredients')."
         )
@@ -466,7 +504,7 @@ def rank_recipes_tfidf(
         if title_col
         else [f"Recipe {i}" for i in ids]
     )
-    raw_ings = df[ing_col].tolist()
+    raw_ings = df[ing_col].tolist() if ing_col else [[]] * len(df)
 
     if time_col:
         times: list[int | None] = []
@@ -478,41 +516,62 @@ def rank_recipes_tfidf(
     else:
         times = [None] * len(df)
 
-    # Build cleaned ingredient text for each recipe (filter out empties)
-    recipe_texts: list[str] = []
-    valid_indices: list[int] = []
-
-    for i, raw_ing in enumerate(raw_ings):
-        cleaned = _parse_and_clean_ingredients(raw_ing)
-        if cleaned:
-            recipe_texts.append(" ".join(cleaned))
-            valid_indices.append(i)
-
-    if not recipe_texts:
-        logger.warning("rank_recipes_tfidf: no recipes with usable ingredient text.")
-        return []
+    # Resolve recipe clean ingredients
+    if cleaned_ingredients is not None:
+        recipe_clean_list = cleaned_ingredients
+    elif "cleaned_ingredients" in df.columns:
+        recipe_clean_list = df["cleaned_ingredients"].tolist()
+    else:
+        recipe_clean_list = [_parse_and_clean_ingredients(x) for x in raw_ings]
 
     user_text = " ".join(user_clean)
 
-    # Fit TF-IDF on recipe corpus, then transform user query
-    try:
-        vectorizer = TfidfVectorizer(token_pattern=r"(?u)\b[a-zA-Z]{2,}\b")
-        recipe_matrix = vectorizer.fit_transform(recipe_texts)
-        user_vector = vectorizer.transform([user_text])
-    except ValueError as exc:
-        logger.warning("rank_recipes_tfidf: TF-IDF vectorization failed (%s). Returning empty.", exc)
-        return []
+    # Compute TF-IDF similarities
+    if vectorizer is not None and recipe_matrix is not None:
+        try:
+            user_vector = vectorizer.transform([user_text])
+            sims = recipe_matrix.dot(user_vector.T).toarray().ravel()
+            valid_indices = list(range(len(df)))
+        except Exception as exc:
+            logger.warning("rank_recipes_tfidf: Precomputed TF-IDF dot product failed (%s). Returning empty.", exc)
+            return []
+    else:
+        # Build cleaned ingredient text for each recipe (filter out empties)
+        if "ingredient_text" in df.columns:
+            recipe_texts = df["ingredient_text"].tolist()
+            valid_indices = list(range(len(df)))
+        else:
+            recipe_texts = []
+            valid_indices = []
+            for i, c_ings in enumerate(recipe_clean_list):
+                if c_ings:
+                    recipe_texts.append(" ".join(c_ings))
+                    valid_indices.append(i)
 
-    sims = cosine_similarity(user_vector, recipe_matrix)[0]  # shape (n_recipes,)
+        if not recipe_texts:
+            logger.warning("rank_recipes_tfidf: no recipes with usable ingredient text.")
+            return []
 
-    # Build Recipe objects, including baseline overlap for matched/missing info
+        try:
+            vectorizer = TfidfVectorizer(token_pattern=r"(?u)\b[a-zA-Z]{2,}\b")
+            matrix = vectorizer.fit_transform(recipe_texts)
+            user_vector = vectorizer.transform([user_text])
+            sims = cosine_similarity(user_vector, matrix)[0]
+        except ValueError as exc:
+            logger.warning("rank_recipes_tfidf: TF-IDF vectorization failed (%s). Returning empty.", exc)
+            return []
+
+    # Build Recipe objects
     user_set = set(user_clean)
     candidates: list[Recipe] = []
 
     for rank_idx, orig_idx in enumerate(valid_indices):
         sim = float(sims[rank_idx])
-        recipe_ing_clean = _parse_and_clean_ingredients(raw_ings[orig_idx])
-        _, matched, missing = calculate_match_score(user_set, recipe_ing_clean)
+        recipe_ing_clean = recipe_clean_list[orig_idx]
+        if not recipe_ing_clean and sim <= 0.0:
+            continue
+        matched = [ing for ing in recipe_ing_clean if ing in user_set]
+        missing = [ing for ing in recipe_ing_clean if ing not in user_set]
 
         candidates.append(
             Recipe(
@@ -527,6 +586,11 @@ def rank_recipes_tfidf(
             )
         )
 
-    # Sort by similarity descending, break ties alphabetically by title
-    candidates.sort(key=lambda r: (-r.similarity_score, r.title, r.recipe_id))  # type: ignore[arg-type]
+    # Sort based on ranking mode
+    if ranking == "best_match":
+        candidates = rank_by_best_match(candidates)
+    else:
+        # Default similarity ranking
+        candidates.sort(key=lambda r: (-r.similarity_score, r.title, r.recipe_id))  # type: ignore[arg-type]
+
     return candidates[:top_n]

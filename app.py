@@ -21,12 +21,20 @@ import ast
 import logging
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 from src.data_loader import get_data_dir, load_csv, validate_foodcom_columns
 from src.preprocessing import clean_ingredient_list, classify_dietary, filter_by_dietary
-from src.recommender import Recipe, rank_recipes, rank_recipes_tfidf
+from src.recommender import (
+    Recipe,
+    _parse_and_clean_ingredients,
+    rank_by_best_match,
+    rank_recipes,
+    rank_recipes_tfidf,
+)
 from src.ui_helpers import (
     filter_by_cooking_time,
     format_recipe_ingredients,
@@ -245,7 +253,7 @@ with col2:
 
 @st.cache_data
 def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
-    """Load the recipe dataset using the existing data loader with caching."""
+    """Load the recipe dataset using the existing data loader with caching and precomputed columns."""
     data_path = get_data_dir("raw") / "RAW_recipes.csv"
     if not data_path.exists():
         return None, (
@@ -255,9 +263,31 @@ def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
     try:
         df = load_csv(data_path)
         validate_foodcom_columns(df)
+
+        # Precompute preprocessed ingredients and text representation once
+        raw_ings = df["ingredients"].tolist()
+        cleaned_ings = [_parse_and_clean_ingredients(x) for x in raw_ings]
+        df["cleaned_ingredients"] = cleaned_ings
+        df["ingredient_text"] = [" ".join(x) for x in cleaned_ings]
+
+        # Precompute conservative dietary classification if tags are available
+        if "tags" in df.columns:
+            tags_list = df["tags"].tolist()
+            df["dietary_class"] = [
+                classify_dietary(t, ing) for t, ing in zip(tags_list, raw_ings)
+            ]
         return df, None
     except Exception as exc:
         return None, f"Error loading recipe dataset: {exc}"
+
+
+@st.cache_resource
+def get_tfidf_index(_df: pd.DataFrame) -> tuple[TfidfVectorizer, Any]:
+    """Fit and cache TF-IDF vectorizer and sparse matrix on recipe texts."""
+    texts = _df["ingredient_text"].tolist()
+    vectorizer = TfidfVectorizer(token_pattern=r"(?u)\b[a-zA-Z]{2,}\b")
+    matrix = vectorizer.fit_transform(texts)
+    return vectorizer, matrix
 
 
 def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
@@ -355,6 +385,7 @@ if find_clicked:
             st.session_state["recommendations"] = []
         else:
             try:
+                # 1. Inexpensive filters first
                 filtered_df = filter_by_cooking_time(recipes_df, cooking_time)
                 filtered_df = filter_by_dietary(filtered_df, dietary_pref)
 
@@ -362,22 +393,62 @@ if find_clicked:
                     st.session_state["search_state"] = "no_filter_matches"
                     st.session_state["recommendations"] = []
                 else:
-                    recommendations = rank_recipes_tfidf(
-                        user_ingredients=cleaned_ingredients,
-                        df=filtered_df,
-                        top_n=20,
-                    )
-                    matched_recs = [
-                        r
-                        for r in recommendations
-                        if (r.similarity_score is not None and r.similarity_score > 0.0)
-                        or (r.score is not None and r.score > 0.0)
-                    ]
+                    # 2. Cached TF-IDF query transformation & sparse similarity
+                    vectorizer, recipe_matrix = get_tfidf_index(recipes_df)
 
-                    if not matched_recs:
+                    user_text = " ".join(cleaned_ingredients)
+                    user_vec = vectorizer.transform([user_text])
+
+                    filtered_indices = filtered_df.index.to_numpy()
+                    sub_matrix = recipe_matrix[filtered_indices]
+                    sims = sub_matrix.dot(user_vec.T).toarray().ravel()
+
+                    pos_mask = sims > 0.0
+                    if not np.any(pos_mask):
                         st.session_state["search_state"] = "no_ingredient_matches"
                         st.session_state["recommendations"] = []
                     else:
+                        cand_indices = filtered_indices[pos_mask]
+                        cand_sims = sims[pos_mask]
+                        cand_df = filtered_df.loc[cand_indices]
+
+                        titles = cand_df["name"].tolist()
+                        ids = cand_df["id"].tolist()
+                        times = cand_df["minutes"].tolist()
+                        c_ings = cand_df["cleaned_ingredients"].tolist()
+
+                        user_set = set(cleaned_ingredients)
+                        matched_recs = []
+                        for r_id, title, raw_time, sim, ing_list in zip(
+                            ids, titles, times, cand_sims, c_ings
+                        ):
+                            matched = [i for i in ing_list if i in user_set]
+                            missing = [i for i in ing_list if i not in user_set]
+                            try:
+                                c_time = (
+                                    int(raw_time)
+                                    if (raw_time is not None and pd.notna(raw_time) and float(raw_time) >= 0)
+                                    else None
+                                )
+                            except (ValueError, TypeError):
+                                c_time = None
+
+                            matched_recs.append(
+                                Recipe(
+                                    recipe_id=str(r_id),
+                                    title=str(title) if pd.notna(title) else "",
+                                    matched_ingredients=matched,
+                                    missing_ingredients=missing,
+                                    cooking_time=c_time,
+                                    score=round(float(sim), 4),
+                                    similarity_score=round(float(sim), 4),
+                                    match_percentage=round(float(sim) * 100.0, 2),
+                                )
+                            )
+
+                        # 3. Default Best Match First ranking
+                        matched_recs = sort_recommendations(matched_recs, "Best match first")
+
                         st.session_state["search_state"] = "has_results"
                         st.session_state["recommendations"] = matched_recs
 

@@ -84,7 +84,7 @@ def filter_by_cooking_time(df: pd.DataFrame, max_time_option: str) -> pd.DataFra
     return df[valid_mask]
 
 
-def sort_recommendations(recipes: list[Recipe], order: str) -> list[Recipe]:
+def sort_recommendations(recipes: list[Recipe], order: str = "Best match first") -> list[Recipe]:
     """Sort a list of Recipe results by the chosen sort order.
 
     The underlying match/similarity scores are not modified.
@@ -95,10 +95,16 @@ def sort_recommendations(recipes: list[Recipe], order: str) -> list[Recipe]:
         List of Recipe results from the recommender.
     order:
         One of:
-        - ``'Best match first'``: descending by match_percentage (default).
-        - ``'Shortest cooking time first'``: ascending by cooking_time, with
-          match_percentage as tie-breaker. Recipes with no recorded cooking
-          time are placed at the end.
+        - ``'Best match first'`` (default):
+            1. Fewer missing ingredients first.
+            2. If missing counts are equal, fewer total usable recipe ingredients first.
+            3. If both are equal, alphabetical order by recipe title (case-insensitive).
+        - ``'Shortest cooking time first'``:
+            1. Ascending by cooking_time (recipes with missing or invalid cooking
+               time are safely placed at the end).
+            2. Tie-break by fewer missing ingredients.
+            3. Tie-break by fewer total usable recipe ingredients.
+            4. Tie-break alphabetically by recipe title.
 
     Returns
     -------
@@ -109,12 +115,25 @@ def sort_recommendations(recipes: list[Recipe], order: str) -> list[Recipe]:
         return sorted(
             recipes,
             key=lambda r: (
-                r.cooking_time if r.cooking_time is not None else float("inf"),
-                -r.match_percentage,  # tie-break: higher match first
+                float(r.cooking_time)
+                if (r.cooking_time is not None and pd.notna(r.cooking_time) and r.cooking_time >= 0)
+                else float("inf"),
+                len(r.missing_ingredients),
+                len(r.matched_ingredients) + len(r.missing_ingredients),
+                (r.title or "").strip().lower(),
+                str(r.recipe_id),
             ),
         )
-    # Default: best match first
-    return sorted(recipes, key=lambda r: -r.match_percentage)
+    # Default: Best match first
+    return sorted(
+        recipes,
+        key=lambda r: (
+            len(r.missing_ingredients),
+            len(r.matched_ingredients) + len(r.missing_ingredients),
+            (r.title or "").strip().lower(),
+            str(r.recipe_id),
+        ),
+    )
 
 
 def format_recipe_ingredients(raw: object) -> str:
