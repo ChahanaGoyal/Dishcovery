@@ -180,28 +180,40 @@ class TestSortRecommendations:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRecipeCardRendering:
-    """Verify render_recipe_card score labels and visual distinction."""
+    """Verify render_recipe_card ingredient coverage badge and visual distinction."""
 
-    def test_baseline_score_label_and_styling(self):
-        rec = _make_recipe("Tomato Pasta", 75.0, 30)
+    def test_card_shows_ingredient_coverage_badge(self):
+        """Card must show 'X of Y ingredients' badge instead of a raw TF-IDF %."""
+        rec = Recipe(
+            recipe_id="r_cov",
+            title="Tomato Pasta",
+            match_percentage=75.0,
+            matched_ingredients=["pasta", "tomato"],
+            missing_ingredients=["garlic"],
+            cooking_time=30,
+        )
         with patch("app.st.markdown") as mock_markdown:
-            render_recipe_card(rec, score_label="Match")
+            render_recipe_card(rec)
             rendered_html = mock_markdown.call_args[0][0]
 
-            assert "recipe-score-match" in rendered_html
-            assert "recipe-score-similarity" not in rendered_html
-            assert "Match: 75" in rendered_html
+            assert "2 of 3 ingredients" in rendered_html
             assert "Tomato Pasta" in rendered_html
+            # Must NOT show raw percentage values as a score label
+            assert "recipe-score-match" in rendered_html
 
-    def test_tfidf_score_label_and_styling(self):
-        rec = _make_recipe("Garlic Bread", 88.2, 15)
+    def test_card_coverage_badge_all_matched(self):
+        rec = Recipe(
+            recipe_id="r_all",
+            title="Boiled Egg",
+            match_percentage=100.0,
+            matched_ingredients=["egg", "water", "salt"],
+            missing_ingredients=[],
+            cooking_time=8,
+        )
         with patch("app.st.markdown") as mock_markdown:
-            render_recipe_card(rec, score_label="Similarity")
+            render_recipe_card(rec)
             rendered_html = mock_markdown.call_args[0][0]
-
-            assert "recipe-score-similarity" in rendered_html
-            assert "recipe-score-match" not in rendered_html
-            assert "Similarity: 88.2%" in rendered_html
+            assert "3 of 3 ingredients" in rendered_html
 
     def test_matched_and_missing_ingredients_visually_distinct(self):
         rec = Recipe(
@@ -240,6 +252,8 @@ class TestRecipeCardRendering:
             assert "ing-all" in rendered_html
             assert "You have all the listed ingredients!" in rendered_html
             assert "ing-miss" not in rendered_html
+            # Coverage badge: 3 of 3
+            assert "3 of 3 ingredients" in rendered_html
 
     def test_cooking_time_display_with_valid_and_missing_time(self):
         rec_timed = _make_recipe("Timed Dish", 50.0, 25)
@@ -389,6 +403,15 @@ class TestEmptyInputHandling:
         result = parse_ingredients("potato, onion, tomato, potato, garlic")
         assert result == ["potato", "onion", "tomato", "garlic"]
 
+    def test_parse_ingredients_returns_lowercase(self):
+        """parse_ingredients must lowercase all tokens for case-insensitive dataset matching."""
+        result = parse_ingredients("Pasta, ONION, Tomato")
+        assert result == ["pasta", "onion", "tomato"]
+
+    def test_parse_ingredients_case_insensitive_deduplication(self):
+        result = parse_ingredients("Garlic, garlic, GARLIC")
+        assert result == ["garlic"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Filter Compatibility & Edge Cases
@@ -446,3 +469,152 @@ class TestFilterCompatibilityAndEdgeCases:
         # sort on empty list produces empty list without error
         sorted_empty = sort_recommendations(matched_recs, "Best match first")
         assert sorted_empty == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Zero-Match Filtering Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestZeroMatchFiltering:
+    """Verify that recipes with zero matching ingredients are excluded from results.
+
+    This guards against the bug where one-ingredient recipes with high TF-IDF
+    cosine similarity (but zero actual overlap) ranked at the top.
+    """
+
+    @pytest.fixture
+    def catalog_df(self) -> pd.DataFrame:
+        """Small catalog with recipes that have varying ingredient overlap."""
+        return pd.DataFrame({
+            "id": [1, 2, 3, 4, 5],
+            "name": [
+                "Tomato Pasta",           # overlaps: pasta, tomato
+                "Macadamia Nut Butter",   # zero overlap with pasta/onion/tomato
+                "One Ingredient Caramel", # zero overlap
+                "Onion Soup",             # overlaps: onion
+                "Veggie Mix",             # overlaps: tomato, onion
+            ],
+            "ingredients": [
+                "['pasta', 'tomato', 'garlic']",
+                "['macadamia nuts']",
+                "['caramel']",
+                "['onion', 'stock', 'butter']",
+                "['tomato', 'onion', 'pepper', 'oil']",
+            ],
+            "minutes": [30, 10, 5, 45, 20],
+        })
+
+    def test_zero_match_recipes_excluded_from_rank_recipes(self, catalog_df):
+        """rank_recipes must not return recipes with zero matching ingredients."""
+        recs = rank_recipes(["pasta", "onion", "tomato"], catalog_df, top_n=10)
+        titles = [r.title for r in recs]
+        assert "Macadamia Nut Butter" not in titles, (
+            "Macadamia Nut Butter has zero matching ingredients and must be excluded"
+        )
+        assert "One Ingredient Caramel" not in titles, (
+            "One Ingredient Caramel has zero matching ingredients and must be excluded"
+        )
+
+    def test_at_least_one_match_required(self, catalog_df):
+        """Every recipe returned by rank_recipes must have at least one matched ingredient."""
+        recs = rank_recipes(["pasta", "onion", "tomato"], catalog_df, top_n=10)
+        for rec in recs:
+            assert len(rec.matched_ingredients) >= 1, (
+                f"Recipe '{rec.title}' has no matched ingredients but was returned"
+            )
+
+    def test_matching_recipes_are_included(self, catalog_df):
+        """Recipes with at least one match must still be recommended."""
+        recs = rank_recipes(["pasta", "onion", "tomato"], catalog_df, top_n=10)
+        titles = [r.title for r in recs]
+        assert "Tomato Pasta" in titles
+        assert "Onion Soup" in titles
+        assert "Veggie Mix" in titles
+
+    def test_fewer_missing_ranks_first(self, catalog_df):
+        """Best match first: recipe with fewer missing ingredients ranks first."""
+        recs = rank_recipes(["pasta", "onion", "tomato", "garlic"], catalog_df, top_n=10)
+        sorted_recs = sort_recommendations(recs, "Best match first")
+        # Tomato Pasta needs pasta/tomato/garlic and user has all three → 0 missing
+        # Onion Soup needs stock and butter → 2 missing
+        # Veggie Mix needs pepper and oil → 2 missing
+        assert sorted_recs[0].title == "Tomato Pasta", (
+            f"Expected Tomato Pasta first (0 missing), got '{sorted_recs[0].title}'"
+        )
+
+    def test_equal_missing_fewer_total_ranks_first(self, catalog_df):
+        """With equal missing, recipe with fewer total ingredients ranks first."""
+        # User has: tomato, onion, salt (salt not in any recipe — does not affect comparison)
+        recs = rank_recipes(["tomato", "onion", "salt"], catalog_df, top_n=10)
+        sorted_recs = sort_recommendations(recs, "Best match first")
+        # Onion Soup: 1 matched (onion), 2 missing (stock, butter) → total 3
+        # Veggie Mix: 2 matched (tomato, onion), 2 missing (pepper, oil) → total 4
+        # Both have 2 missing; Onion Soup has fewer total → ranks first
+        titles = [r.title for r in sorted_recs]
+        assert titles.index("Onion Soup") < titles.index("Veggie Mix"), (
+            "Onion Soup (3 total) should rank before Veggie Mix (4 total) when both have equal missing"
+        )
+
+    def test_alphabetical_tiebreak(self):
+        """Equal missing and equal total → alphabetical order by title."""
+        recs = [
+            Recipe(recipe_id="z", title="Zucchini Dish",
+                   matched_ingredients=["tomato"], missing_ingredients=["oil"]),
+            Recipe(recipe_id="a", title="Apple Soup",
+                   matched_ingredients=["tomato"], missing_ingredients=["oil"]),
+            Recipe(recipe_id="m", title="Mushroom Risotto",
+                   matched_ingredients=["tomato"], missing_ingredients=["oil"]),
+        ]
+        sorted_recs = sort_recommendations(recs, "Best match first")
+        assert [r.title for r in sorted_recs] == [
+            "Apple Soup", "Mushroom Risotto", "Zucchini Dish"
+        ]
+
+    def test_no_ingredient_matches_returns_empty(self, catalog_df):
+        """When user enters ingredients that match nothing, rank_recipes returns empty."""
+        recs = rank_recipes(["uranium", "xenon"], catalog_df, top_n=10)
+        assert recs == [], "Expected empty list when no recipes have matching ingredients"
+
+    def test_duplicate_user_ingredients_do_not_distort_results(self, catalog_df):
+        """Duplicate user ingredients must be handled without inflating match counts."""
+        recs_dedup = rank_recipes(["tomato", "onion"], catalog_df, top_n=10)
+        recs_dup = rank_recipes(["tomato", "tomato", "onion", "onion"], catalog_df, top_n=10)
+        # Same ingredients, same results
+        assert [r.title for r in recs_dedup] == [r.title for r in recs_dup]
+
+    def test_empty_ingredient_strings_ignored(self, catalog_df):
+        """Empty strings in user input must not cause false matches."""
+        recs = rank_recipes(["tomato", "", " ", "onion"], catalog_df, top_n=10)
+        for rec in recs:
+            assert len(rec.matched_ingredients) >= 1
+
+    def test_ingredient_matching_is_case_insensitive(self):
+        """Ingredient matching between user input and dataset must be case-insensitive."""
+        from src.ui_helpers import parse_ingredients
+        # parse_ingredients lowercases; dataset cleaned_ingredients are also lowercase
+        user_ings = parse_ingredients("Pasta, ONION, Tomato")
+        assert user_ings == ["pasta", "onion", "tomato"]
+        # They must match the lowercase cleaned dataset tokens
+        user_set = set(user_ings)
+        recipe_tokens = ["pasta", "tomato", "garlic"]  # as stored in cleaned_ingredients
+        matched = [i for i in recipe_tokens if i in user_set]
+        assert matched == ["pasta", "tomato"]
+
+    def test_coverage_badge_in_card_not_tfidf_percent(self):
+        """Card must show 'X of Y ingredients' badge, not a raw TF-IDF similarity %."""
+        rec = Recipe(
+            recipe_id="cb_test",
+            title="Pasta Dish",
+            match_percentage=99.9,  # This was raw TF-IDF; card must ignore it
+            matched_ingredients=["pasta", "tomato"],
+            missing_ingredients=["garlic"],
+            cooking_time=20,
+            similarity_score=0.999,
+        )
+        with patch("app.st.markdown") as mock_markdown:
+            render_recipe_card(rec)
+            html_text = mock_markdown.call_args[0][0]
+            # Must display "2 of 3 ingredients" badge
+            assert "2 of 3 ingredients" in html_text
+            # Must NOT show the raw 99.9% cosine similarity value as the badge
+            assert "99.9%" not in html_text

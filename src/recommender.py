@@ -195,6 +195,10 @@ def rank_recipes(
 ) -> list[Recipe]:
     """Rank recipes by ingredient match percentage and return the top matches.
 
+    Only recipes that share at least ONE ingredient with the user's input are
+    returned. Recipes with zero matching ingredients are always excluded, even
+    when ``min_match=0.0``, because they are genuinely irrelevant.
+
     Recipes are sorted from highest to lowest match percentage. Ties are broken
     consistently by fewest missing ingredients, then alphabetically by title.
 
@@ -290,6 +294,12 @@ def rank_recipes(
             continue
 
         pct, matched, missing = calculate_match_score(user_set, recipe_clean)
+
+        # Exclude recipes with zero matching ingredients — they are irrelevant
+        # regardless of min_match, because 0.0 < 0.0 is False and would let them through.
+        if not matched:
+            continue
+
         if pct < min_match:
             continue
 
@@ -572,6 +582,11 @@ def rank_recipes_tfidf(
             continue
         matched = [ing for ing in recipe_ing_clean if ing in user_set]
         missing = [ing for ing in recipe_ing_clean if ing not in user_set]
+
+        # Exclude recipes with zero matching ingredients — TF-IDF cosine similarity
+        # can be nonzero for sub-word token overlap even with no genuine ingredient match.
+        if not matched:
+            continue
 
         candidates.append(
             Recipe(

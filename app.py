@@ -294,8 +294,8 @@ def get_tfidf_index(_df: pd.DataFrame) -> tuple[TfidfVectorizer, Any]:
 def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
     """Render a single recipe recommendation card using styled HTML.
 
-    Uses distinct colours for Match/Relevance % vs Similarity %
-    so users are never confused about which score they are seeing.
+    Displays a human-readable ingredient coverage badge ("X of Y ingredients")
+    instead of a raw TF-IDF percentage, which is not meaningful to ordinary users.
     All user and recipe strings are safely HTML-escaped to prevent injection.
     Lines contain zero indentation to prevent markdown parsers from treating
     the HTML as an indented code block.
@@ -314,17 +314,14 @@ def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
     )
     safe_time = html.escape(time_str)
 
-    if recipe.similarity_score is not None and recipe.similarity_score > 0.0:
-        match_pct = round(recipe.similarity_score * 100.0, 1)
+    # Build a human-readable ingredient coverage badge instead of a raw TF-IDF %.
+    n_matched = len(recipe.matched_ingredients)
+    n_total = len(recipe.matched_ingredients) + len(recipe.missing_ingredients)
+    if n_total > 0:
+        coverage_str = f"🧂 {n_matched} of {n_total} ingredients"
     else:
-        match_pct = round(recipe.match_percentage, 1)
-
-    # Score label class: amber for Match/Relevance, cyan for Similarity
-    score_css_class = (
-        "recipe-score-similarity" if score_label == "Similarity" else "recipe-score-match"
-    )
-    score_icon = "🔵" if score_label == "Similarity" else "🎯"
-    safe_score_label = html.escape(score_label)
+        coverage_str = "🧂 Ingredients unknown"
+    safe_coverage = html.escape(coverage_str)
 
     total_req = recipe.matched_ingredients + recipe.missing_ingredients
     safe_total_req = [html.escape(str(x)) for x in total_req]
@@ -341,7 +338,7 @@ def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
     if recipe.matched_ingredients:
         have_html = (
             f'<div class="ing-row ing-have"><span class="ing-label">'
-            f'✅ You have ({len(recipe.matched_ingredients)}):</span> '
+            f'✅ You have ({n_matched}):</span> '
             f'{", ".join(safe_matched)}</div>\n'
         )
     else:
@@ -360,7 +357,7 @@ def render_recipe_card(recipe: Recipe, score_label: str = "Relevance") -> None:
         f'<div class="recipe-card">\n'
         f'<div style="display:flex; justify-content:space-between; align-items:flex-start;">\n'
         f'<div class="recipe-title">🍽️ {safe_title}</div>\n'
-        f'<div class="{score_css_class}">{score_icon} {safe_score_label}: {match_pct}%</div>\n'
+        f'<div class="recipe-score-match">{safe_coverage}</div>\n'
         f'</div>\n'
         f'<div class="recipe-meta">{safe_time}</div>\n'
         f'{req_html}'
@@ -436,6 +433,14 @@ if find_clicked:
                         ):
                             matched = [i for i in ing_list if i in user_set]
                             missing = [i for i in ing_list if i not in user_set]
+
+                            # Exclude recipes with zero matching ingredients.
+                            # TF-IDF cosine similarity can be nonzero for recipes that
+                            # share sub-word tokens (e.g. "macadamia" vs "mac") but have
+                            # no genuine ingredient overlap — these must be excluded.
+                            if not matched:
+                                continue
+
                             try:
                                 c_time = (
                                     int(raw_time)
@@ -445,6 +450,7 @@ if find_clicked:
                             except (ValueError, TypeError):
                                 c_time = None
 
+                            total_ings = len(matched) + len(missing)
                             matched_recs.append(
                                 Recipe(
                                     recipe_id=str(r_id),
@@ -454,14 +460,25 @@ if find_clicked:
                                     cooking_time=c_time,
                                     score=round(float(sim), 4),
                                     similarity_score=round(float(sim), 4),
-                                    match_percentage=round(float(sim) * 100.0, 2),
+                                    # Store ingredient coverage as match_percentage so the
+                                    # card can show "X of Y ingredients" without exposing
+                                    # the internal TF-IDF cosine similarity value.
+                                    match_percentage=round(
+                                        (len(matched) / total_ings * 100.0) if total_ings > 0 else 0.0,
+                                        2,
+                                    ),
                                 )
                             )
 
                         # 3. Default Best Match First ranking
                         matched_recs = sort_recommendations(matched_recs, "Best match first")
 
-                        st.session_state["search_state"] = "has_results"
+                        if not matched_recs:
+                            # TF-IDF found token-level hits but zero recipes had a
+                            # genuine ingredient overlap — treat the same as no matches.
+                            st.session_state["search_state"] = "no_ingredient_matches"
+                        else:
+                            st.session_state["search_state"] = "has_results"
                         st.session_state["recommendations"] = matched_recs
 
                 st.session_state["search_ingredients"] = cleaned_ingredients

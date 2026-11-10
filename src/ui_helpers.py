@@ -25,7 +25,10 @@ from src.recommender import Recipe
 
 def parse_ingredients(raw_input: str) -> list[str]:
     """Parse comma-separated ingredients, stripping whitespace, removing empty items,
-    and deduplicating while preserving original order.
+    deduplicating while preserving original order, and normalising to lowercase.
+
+    Lowercase normalisation is essential so that user input ("Pasta", "PASTA")
+    matches the dataset's pre-cleaned ingredient tokens (always lowercase).
 
     Parameters
     ----------
@@ -35,17 +38,16 @@ def parse_ingredients(raw_input: str) -> list[str]:
     Returns
     -------
     list[str]
-        Cleaned, deduplicated ingredient tokens.
+        Lowercase, cleaned, deduplicated ingredient tokens.
     """
     cleaned_ingredients: list[str] = []
     seen: set[str] = set()
     for item in raw_input.split(","):
-        cleaned = item.strip()
-        if cleaned:
-            key = cleaned.lower()
-            if key not in seen:
-                seen.add(key)
-                cleaned_ingredients.append(cleaned)
+        # Normalise to lowercase so matching against dataset tokens works correctly.
+        cleaned = item.strip().lower()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            cleaned_ingredients.append(cleaned)
     return cleaned_ingredients
 
 

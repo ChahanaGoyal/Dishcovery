@@ -159,14 +159,18 @@ class TestCalculateMatchScore:
 
 class TestRankRecipes:
     def test_higher_match_percentage_appears_first(self, sample_recipes_df):
-        """Recipes with higher match percentages appear first."""
-        # User has: tomato, onion, broth (matches 2/3 of r1 = 66.7%, 3/4 of r2 = 75%, 2/5 of r3 = 40%, 0/3 of r4 = 0%)
+        """Recipes with higher match percentages appear first. Zero-match recipes are excluded."""
+        # User has: tomato, onion, broth
+        # r1: 1/3 = 33.33% (tomato matches)
+        # r2: 3/4 = 75.0% (tomato, onion, broth match)
+        # r3: 2/5 = 40.0% (onion, tomato match)
+        # r4: 0/3 = 0.0% (apple, banana, orange — EXCLUDED: zero matching ingredients)
         results = rank_recipes(
             user_ingredients=["tomato", "onion", "broth"],
             df=sample_recipes_df,
             top_n=5,
         )
-        assert len(results) == 4
+        assert len(results) == 3  # r4 excluded: zero matching ingredients
         percentages = [r.match_percentage for r in results]
         assert percentages == sorted(percentages, reverse=True)
         assert results[0].recipe_id == "r2"  # 75%
@@ -270,9 +274,15 @@ class TestRankRecipes:
         assert results[0].cooking_time == 5
 
     def test_match_recipes_helper(self, sample_recipes_df):
-        """match_recipes returns match results for all recipes."""
+        """match_recipes returns match results only for recipes with at least one matched ingredient."""
         results = match_recipes(["tomato"], sample_recipes_df)
-        assert len(results) == len(sample_recipes_df)
+        # r4 (Fruit Bowl: apple, banana, orange) has zero matches and must be excluded.
+        # r1, r2, r3 all contain tomato and are included.
+        assert len(results) == 3
+        result_ids = {r.recipe_id for r in results}
+        assert result_ids == {"r1", "r2", "r3"}
+        for rec in results:
+            assert len(rec.matched_ingredients) >= 1
 
     def test_recipe_dataclass_methods(self):
         """Recipe dataclass properties and conversion methods."""
@@ -292,22 +302,27 @@ class TestRankRecipes:
         assert d["cooking_time"] == 20
 
     def test_partial_ingredient_controlled_3_recipes(self):
-        """Prompt 22 Task 3: Controlled 3-recipe test with partial ingredient input."""
+        """Prompt 22 Task 3: Controlled 3-recipe test with partial ingredient input.
+
+        Only recipes with at least one matching ingredient are returned.
+        'Garlic Butter Pasta' has zero matching ingredients (tomato/basil vs pasta/garlic/butter/parmesan)
+        and must be excluded.
+        """
         df = pd.DataFrame(
             {
                 "recipe_id": ["p1", "p2", "p3"],
                 "title": ["Margherita Pizza", "Tomato Bruschetta", "Garlic Butter Pasta"],
                 "ingredients": [
-                    "flour, yeast, tomato, mozzarella, basil",   # 5 items
-                    "bread, tomato, garlic, basil",              # 4 items
-                    "pasta, garlic, butter, parmesan",           # 4 items
+                    "flour, yeast, tomato, mozzarella, basil",   # 5 items; tomato+basil match
+                    "bread, tomato, garlic, basil",              # 4 items; tomato+basil match
+                    "pasta, garlic, butter, parmesan",           # 4 items; ZERO matches → excluded
                 ],
                 "minutes": [45, 15, 20],
             }
         )
         # User provides 2 ingredients: tomato and basil
         results = rank_recipes(["tomato", "basil"], df, top_n=3)
-        assert len(results) == 3
+        assert len(results) == 2  # p3 excluded: zero matching ingredients
 
         # p2 (Bruschetta) has 2/4 = 50.0% match
         assert results[0].recipe_id == "p2"
@@ -318,11 +333,6 @@ class TestRankRecipes:
         assert results[1].recipe_id == "p1"
         assert results[1].match_percentage == 40.0
         assert results[1].missing_ingredients == ["flour", "yeast", "mozzarella"]
-
-        # p3 (Pasta) has 0/4 = 0.0% match
-        assert results[2].recipe_id == "p3"
-        assert results[2].match_percentage == 0.0
-        assert set(results[2].missing_ingredients) == {"pasta", "garlic", "butter", "parmesan"}
 
     def test_equal_scores_handled_consistently_with_tie_breaking(self):
         """Prompt 22 Task 3: Equal scores broken by fewest missing ingredients then title."""
