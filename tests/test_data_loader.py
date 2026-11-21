@@ -15,9 +15,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from unittest.mock import MagicMock, patch
+
 from src.data_loader import (
+    DEFAULT_DATASET_FILENAME,
+    DEFAULT_HF_REPO_ID,
     FOODCOM_REQUIRED_COLUMNS,
+    download_dataset_from_hf,
     get_data_dir,
+    get_dataset_path,
     load_csv,
     validate_foodcom_columns,
 )
@@ -151,3 +157,126 @@ class TestGetDataDir:
         p = get_data_dir("raw")
         assert p.parts[-2] == "data"
         assert p.parts[-1] == "raw"
+
+
+# ── Hugging Face Dataset Integration ──────────────────────────────────────────
+
+
+class TestHuggingFaceDatasetLoading:
+    def test_default_constants(self) -> None:
+        """Default repo ID and filename match configuration."""
+        assert "Chahanagoyal/dishcovery-recipes" in DEFAULT_HF_REPO_ID
+        assert DEFAULT_DATASET_FILENAME == "RAW_recipes.csv"
+
+    @patch("huggingface_hub.hf_hub_download")
+    def test_download_dataset_from_hf_calls_hub(self, mock_download: MagicMock, tmp_path: Path) -> None:
+        """hf_hub_download is called with public repo parameters and token=None."""
+        expected_path = tmp_path / "RAW_recipes.csv"
+        mock_download.return_value = str(expected_path)
+
+        result = download_dataset_from_hf(
+            repo_id="Chahanagoyal/dishcovery-recipes",
+            filename="RAW_recipes.csv",
+            local_dir=tmp_path,
+        )
+
+        assert result == expected_path
+        mock_download.assert_called_once_with(
+            repo_id="Chahanagoyal/dishcovery-recipes",
+            filename="RAW_recipes.csv",
+            repo_type="dataset",
+            local_dir=str(tmp_path),
+            token=None,
+        )
+
+    @patch("huggingface_hub.hf_hub_download")
+    def test_download_dataset_from_hf_raises_runtime_error_on_failure(self, mock_download: MagicMock) -> None:
+        """Failed hub downloads raise a descriptive RuntimeError."""
+        mock_download.side_effect = ConnectionError("Network unreachable")
+
+        with pytest.raises(RuntimeError, match="Could not download dataset 'RAW_recipes.csv'"):
+            download_dataset_from_hf(
+                repo_id="Chahanagoyal/dishcovery-recipes",
+                filename="RAW_recipes.csv",
+            )
+
+    def test_get_dataset_path_uses_existing_local_file(self, tmp_path: Path) -> None:
+        """If the local dataset file already exists, it is returned without downloading."""
+        local_csv = _write_csv(tmp_path / "RAW_recipes.csv", _FOODCOM_CSV)
+
+        with patch("src.data_loader.download_dataset_from_hf") as mock_hf_download:
+            resolved = get_dataset_path(
+                filename="RAW_recipes.csv",
+                local_dir=tmp_path,
+                download_if_missing=True,
+            )
+            assert resolved == local_csv
+            mock_hf_download.assert_not_called()
+
+    @patch("src.data_loader.download_dataset_from_hf")
+    def test_get_dataset_path_downloads_when_local_file_missing(
+        self,
+        mock_hf_download: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """If the local dataset is missing, it is retrieved from Hugging Face."""
+        downloaded_target = tmp_path / "RAW_recipes.csv"
+        mock_hf_download.return_value = downloaded_target
+
+        resolved = get_dataset_path(
+            filename="RAW_recipes.csv",
+            repo_id="Chahanagoyal/dishcovery-recipes",
+            download_if_missing=True,
+            local_dir=tmp_path,
+        )
+
+        assert resolved == downloaded_target
+        mock_hf_download.assert_called_once_with(
+            repo_id="Chahanagoyal/dishcovery-recipes",
+            filename="RAW_recipes.csv",
+            local_dir=tmp_path,
+        )
+
+    def test_get_dataset_path_raises_file_not_found_when_download_disabled(self, tmp_path: Path) -> None:
+        """FileNotFoundError is raised when local file is missing and download is disabled."""
+        with pytest.raises(FileNotFoundError, match="and download_if_missing is False"):
+            get_dataset_path(
+                filename="RAW_recipes.csv",
+                local_dir=tmp_path,
+                download_if_missing=False,
+            )
+
+
+# ── App Catalog Loading ───────────────────────────────────────────────────────
+
+
+class TestAppCatalogLoading:
+    def test_load_recipe_catalog_success(self, tmp_path: Path) -> None:
+        """load_recipe_catalog loads and precomputes columns from resolved dataset."""
+        from app import load_recipe_catalog
+
+        csv_file = _write_csv(tmp_path / "RAW_recipes.csv", _FOODCOM_CSV)
+        with patch("app.get_dataset_path", return_value=csv_file):
+            # Clear cache for isolated test
+            load_recipe_catalog.clear()
+            df, err = load_recipe_catalog()
+
+            assert err is None
+            assert df is not None
+            assert "cleaned_ingredients" in df.columns
+            assert "ingredient_text" in df.columns
+            assert len(df) == 2
+
+    def test_load_recipe_catalog_error_handled_gracefully(self) -> None:
+        """load_recipe_catalog catches errors and returns a user-friendly error message."""
+        from app import load_recipe_catalog
+
+        with patch("app.get_dataset_path", side_effect=RuntimeError("HF Hub offline")):
+            load_recipe_catalog.clear()
+            df, err = load_recipe_catalog()
+
+            assert df is None
+            assert err is not None
+            assert "Error loading recipe dataset" in err
+            assert "HF Hub offline" in err
+

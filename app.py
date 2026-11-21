@@ -27,7 +27,12 @@ import pandas as pd
 import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from src.data_loader import get_data_dir, load_csv, validate_foodcom_columns
+from src.data_loader import (
+    get_data_dir,
+    get_dataset_path,
+    load_csv,
+    validate_foodcom_columns,
+)
 from src.preprocessing import clean_ingredient_list, classify_dietary, filter_by_dietary
 from src.recommender import (
     Recipe,
@@ -254,14 +259,13 @@ with col2:
 
 @st.cache_data
 def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
-    """Load the recipe dataset using the existing data loader with caching and precomputed columns."""
-    data_path = get_data_dir("raw") / "RAW_recipes.csv"
-    if not data_path.exists():
-        return None, (
-            f"Recipe dataset not found at `{data_path}`. "
-            "Please download the Food.com `RAW_recipes.csv` and place it in `data/raw/`."
-        )
+    """Load the recipe dataset using the existing data loader with caching and precomputed columns.
+
+    Retrieves from local data/raw/RAW_recipes.csv if present, or downloads from
+    the public Hugging Face repository Chahanagoyal/dishcovery-recipes if absent.
+    """
     try:
+        data_path = get_dataset_path()
         df = load_csv(data_path)
         validate_foodcom_columns(df)
 
@@ -279,7 +283,12 @@ def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
             ]
         return df, None
     except Exception as exc:
-        return None, f"Error loading recipe dataset: {exc}"
+        logger.error("Failed to load recipe dataset: %s", exc, exc_info=True)
+        return None, (
+            f"Error loading recipe dataset: {exc}. "
+            "Please ensure `data/raw/RAW_recipes.csv` is present or that internet access "
+            "is available to download it from Hugging Face."
+        )
 
 
 @st.cache_resource
