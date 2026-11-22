@@ -363,7 +363,7 @@ class IngredientRecommender:
                 f"Found columns: {list(df.columns)}"
             )
 
-        self._recipes = df.copy()
+        self._recipes = df
         self._is_fitted = True
         logger.info("Recommender fitted on %d recipes.", len(df))
         return self

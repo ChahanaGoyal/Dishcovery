@@ -20,7 +20,9 @@ from __future__ import annotations
 import ast
 import html
 import logging
+import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -28,6 +30,7 @@ import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from src.data_loader import (
+    FOODCOM_LOAD_COLUMNS,
     get_data_dir,
     get_dataset_path,
     load_csv,
@@ -49,6 +52,7 @@ from src.ui_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 # ── Page configuration ────────────────────────────────────────────────────────
 st.set_page_config(
@@ -263,17 +267,29 @@ def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
 
     Retrieves from local data/raw/RAW_recipes.csv if present, or downloads from
     the public Hugging Face repository Chahanagoyal/dishcovery-recipes if absent.
+
+    Memory optimisation: only the 5 columns Dishcovery actually uses are loaded
+    (id, name, minutes, ingredients, tags).  The full 12-column CSV takes ~358 MB;
+    restricting to these 5 columns reduces that to ~130 MB, saving ~230 MB on
+    Streamlit Community Cloud where memory is limited.
     """
+    t0 = time.monotonic()
     try:
         data_path = get_dataset_path()
-        df = load_csv(data_path)
+        logger.info("Loading dataset from '%s'...", data_path)
+
+        # Load only the columns Dishcovery needs — avoids wasting ~230 MB on
+        # contributor_id, submitted, nutrition, n_steps, steps, description, n_ingredients.
+        df = load_csv(data_path, usecols=FOODCOM_LOAD_COLUMNS)
         validate_foodcom_columns(df)
+        logger.info("Loaded %d recipes in %.1fs.", len(df), time.monotonic() - t0)
 
         # Precompute preprocessed ingredients and text representation once
         raw_ings = df["ingredients"].tolist()
         cleaned_ings = [_parse_and_clean_ingredients(x) for x in raw_ings]
         df["cleaned_ingredients"] = cleaned_ings
         df["ingredient_text"] = [" ".join(x) for x in cleaned_ings]
+        logger.info("Ingredient preprocessing complete (%.1fs total).", time.monotonic() - t0)
 
         # Precompute conservative dietary classification if tags are available
         if "tags" in df.columns:
@@ -292,11 +308,35 @@ def load_recipe_catalog() -> tuple[pd.DataFrame | None, str | None]:
 
 
 @st.cache_resource
-def get_tfidf_index(_df: pd.DataFrame) -> tuple[TfidfVectorizer, Any]:
-    """Fit and cache TF-IDF vectorizer and sparse matrix on recipe texts."""
-    texts = _df["ingredient_text"].tolist()
+def get_tfidf_index() -> tuple[TfidfVectorizer, Any] | tuple[None, None]:
+    """Fit and cache TF-IDF vectorizer and sparse matrix on the recipe catalog.
+
+    Uses @st.cache_resource so the fitted vectorizer and sparse matrix are built
+    exactly once per server process and shared across all sessions — they are never
+    garbage-collected between user interactions.
+
+    Previously this function accepted the DataFrame as an argument, which caused
+    @st.cache_resource to hash a 200 MB DataFrame on every call, defeating caching
+    and leading to repeated expensive refits on Streamlit Cloud.  Now the DataFrame
+    is retrieved directly from the already-cached load_recipe_catalog() result, so
+    the cache key is stable and the index is built only once.
+    """
+    t0 = time.monotonic()
+    catalog_df, load_err = load_recipe_catalog()
+    if load_err or catalog_df is None or catalog_df.empty:
+        logger.warning("get_tfidf_index: catalog unavailable, returning empty index.")
+        return None, None
+
+    texts = catalog_df["ingredient_text"].tolist()
+    logger.info("Fitting TF-IDF vectorizer on %d recipes...", len(texts))
     vectorizer = TfidfVectorizer(token_pattern=r"(?u)\b[a-zA-Z]{2,}\b")
     matrix = vectorizer.fit_transform(texts)
+    logger.info(
+        "TF-IDF index built: shape=%s, nnz=%d (%.1fs).",
+        matrix.shape,
+        matrix.nnz,
+        time.monotonic() - t0,
+    )
     return vectorizer, matrix
 
 
@@ -412,83 +452,100 @@ if find_clicked:
                     st.session_state["recommendations"] = []
                 else:
                     # 2. Cached TF-IDF query transformation & sparse similarity
-                    vectorizer, recipe_matrix = get_tfidf_index(recipes_df)
+                    # get_tfidf_index() takes no arguments — it retrieves the
+                    # catalog from cache internally, ensuring a stable cache key
+                    # so the vectorizer is built only once per server process.
+                    vectorizer, recipe_matrix = get_tfidf_index()
 
-                    user_text = " ".join(cleaned_ingredients)
-                    user_vec = vectorizer.transform([user_text])
-
-                    filtered_indices = filtered_df.index.to_numpy()
-                    sub_matrix = recipe_matrix[filtered_indices]
-                    sims = sub_matrix.dot(user_vec.T).toarray().ravel()
-
-                    pos_mask = sims > 0.0
-                    if not np.any(pos_mask):
-                        st.session_state["search_state"] = "no_ingredient_matches"
+                    if vectorizer is None or recipe_matrix is None:
+                        st.session_state["search_state"] = "error"
+                        st.session_state["search_error_msg"] = (
+                            "Recipe index could not be built. "
+                            "Please check application logs."
+                        )
                         st.session_state["recommendations"] = []
                     else:
-                        cand_indices = filtered_indices[pos_mask]
-                        cand_sims = sims[pos_mask]
-                        cand_df = filtered_df.loc[cand_indices]
+                        _t0 = time.monotonic()
+                        user_text = " ".join(cleaned_ingredients)
+                        user_vec = vectorizer.transform([user_text])
 
-                        titles = cand_df["name"].tolist()
-                        ids = cand_df["id"].tolist()
-                        times = cand_df["minutes"].tolist()
-                        c_ings = cand_df["cleaned_ingredients"].tolist()
+                        filtered_indices = filtered_df.index.to_numpy()
+                        sub_matrix = recipe_matrix[filtered_indices]
+                        sims = sub_matrix.dot(user_vec.T).toarray().ravel()
 
-                        user_set = set(cleaned_ingredients)
-                        matched_recs = []
-                        for r_id, title, raw_time, sim, ing_list in zip(
-                            ids, titles, times, cand_sims, c_ings
-                        ):
-                            matched = [i for i in ing_list if i in user_set]
-                            missing = [i for i in ing_list if i not in user_set]
+                        pos_mask = sims > 0.0
+                        if not np.any(pos_mask):
+                            st.session_state["search_state"] = "no_ingredient_matches"
+                            st.session_state["recommendations"] = []
+                        else:
+                            cand_indices = filtered_indices[pos_mask]
+                            cand_sims = sims[pos_mask]
+                            cand_df = filtered_df.loc[cand_indices]
 
-                            # Exclude recipes with zero matching ingredients.
-                            # TF-IDF cosine similarity can be nonzero for recipes that
-                            # share sub-word tokens (e.g. "macadamia" vs "mac") but have
-                            # no genuine ingredient overlap — these must be excluded.
-                            if not matched:
-                                continue
+                            titles = cand_df["name"].tolist()
+                            ids = cand_df["id"].tolist()
+                            times = cand_df["minutes"].tolist()
+                            c_ings = cand_df["cleaned_ingredients"].tolist()
 
-                            try:
-                                c_time = (
-                                    int(raw_time)
-                                    if (raw_time is not None and pd.notna(raw_time) and float(raw_time) >= 0)
-                                    else None
+                            user_set = set(cleaned_ingredients)
+                            matched_recs = []
+                            for r_id, title, raw_time, sim, ing_list in zip(
+                                ids, titles, times, cand_sims, c_ings
+                            ):
+                                matched = [i for i in ing_list if i in user_set]
+                                missing = [i for i in ing_list if i not in user_set]
+
+                                # Exclude recipes with zero matching ingredients.
+                                # TF-IDF cosine similarity can be nonzero for recipes that
+                                # share sub-word tokens (e.g. "macadamia" vs "mac") but have
+                                # no genuine ingredient overlap — these must be excluded.
+                                if not matched:
+                                    continue
+
+                                try:
+                                    c_time = (
+                                        int(raw_time)
+                                        if (raw_time is not None and pd.notna(raw_time) and float(raw_time) >= 0)
+                                        else None
+                                    )
+                                except (ValueError, TypeError):
+                                    c_time = None
+
+                                total_ings = len(matched) + len(missing)
+                                matched_recs.append(
+                                    Recipe(
+                                        recipe_id=str(r_id),
+                                        title=str(title) if pd.notna(title) else "",
+                                        matched_ingredients=matched,
+                                        missing_ingredients=missing,
+                                        cooking_time=c_time,
+                                        score=round(float(sim), 4),
+                                        similarity_score=round(float(sim), 4),
+                                        # Store ingredient coverage as match_percentage so the
+                                        # card can show "X of Y ingredients" without exposing
+                                        # the internal TF-IDF cosine similarity value.
+                                        match_percentage=round(
+                                            (len(matched) / total_ings * 100.0) if total_ings > 0 else 0.0,
+                                            2,
+                                        ),
+                                    )
                                 )
-                            except (ValueError, TypeError):
-                                c_time = None
 
-                            total_ings = len(matched) + len(missing)
-                            matched_recs.append(
-                                Recipe(
-                                    recipe_id=str(r_id),
-                                    title=str(title) if pd.notna(title) else "",
-                                    matched_ingredients=matched,
-                                    missing_ingredients=missing,
-                                    cooking_time=c_time,
-                                    score=round(float(sim), 4),
-                                    similarity_score=round(float(sim), 4),
-                                    # Store ingredient coverage as match_percentage so the
-                                    # card can show "X of Y ingredients" without exposing
-                                    # the internal TF-IDF cosine similarity value.
-                                    match_percentage=round(
-                                        (len(matched) / total_ings * 100.0) if total_ings > 0 else 0.0,
-                                        2,
-                                    ),
-                                )
+                            # 3. Default Best Match First ranking
+                            matched_recs = sort_recommendations(matched_recs, "Best match first")
+                            logger.info(
+                                "Recommendation search complete: %d candidates in %.2fs.",
+                                len(matched_recs),
+                                time.monotonic() - _t0,
                             )
 
-                        # 3. Default Best Match First ranking
-                        matched_recs = sort_recommendations(matched_recs, "Best match first")
-
-                        if not matched_recs:
-                            # TF-IDF found token-level hits but zero recipes had a
-                            # genuine ingredient overlap — treat the same as no matches.
-                            st.session_state["search_state"] = "no_ingredient_matches"
-                        else:
-                            st.session_state["search_state"] = "has_results"
-                        st.session_state["recommendations"] = matched_recs
+                            if not matched_recs:
+                                # TF-IDF found token-level hits but zero recipes had a
+                                # genuine ingredient overlap — treat the same as no matches.
+                                st.session_state["search_state"] = "no_ingredient_matches"
+                            else:
+                                st.session_state["search_state"] = "has_results"
+                            st.session_state["recommendations"] = matched_recs
 
                 st.session_state["search_ingredients"] = cleaned_ingredients
                 st.session_state["search_cooking_time"] = cooking_time

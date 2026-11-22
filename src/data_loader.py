@@ -15,7 +15,14 @@ Food.com column → Dishcovery name mapping
 ``name``        → recipe title
 ``ingredients`` → ingredient list (stored as a Python-list string in the CSV)
 ``minutes``     → total cooking time in minutes
-``steps``       → ordered preparation steps
+``tags``        → recipe tags (used for dietary classification)
+
+Memory note
+-----------
+RAW_recipes.csv contains 12 columns but Dishcovery only uses 5.
+Always pass ``usecols`` to :func:`load_csv` to avoid loading unused columns
+(``contributor_id``, ``submitted``, ``nutrition``, ``n_steps``, ``steps``,
+``description``, ``n_ingredients``) which together add ~230 MB of RAM.
 """
 
 from __future__ import annotations
@@ -37,9 +44,23 @@ FOODCOM_REQUIRED_COLUMNS: list[str] = [
     "minutes",
 ]
 
+# Columns to load from the CSV — only what Dishcovery actually needs.
+# Loading the full 12-column file uses ~358 MB; restricting to these 5
+# columns reduces that to ~130 MB, saving ~230 MB per deployment instance.
+FOODCOM_LOAD_COLUMNS: list[str] = [
+    "id",
+    "name",
+    "minutes",
+    "ingredients",
+    "tags",  # needed for dietary classification
+]
+
 # Default Hugging Face repository and file for hosted dataset retrieval.
 DEFAULT_HF_REPO_ID: str = os.getenv("DISHCOVERY_HF_REPO", "Chahanagoyal/dishcovery-recipes")
 DEFAULT_DATASET_FILENAME: str = "RAW_recipes.csv"
+
+# Timeout in seconds for Hugging Face downloads (prevents indefinite hangs).
+HF_DOWNLOAD_TIMEOUT_SECONDS: int = int(os.getenv("DISHCOVERY_HF_TIMEOUT", "120"))
 
 
 def load_csv(
@@ -128,10 +149,14 @@ def download_dataset_from_hf(
     repo_id: str = DEFAULT_HF_REPO_ID,
     filename: str = DEFAULT_DATASET_FILENAME,
     local_dir: str | Path | None = None,
+    max_retries: int = 2,
 ) -> Path:
     """Download a dataset file from a public Hugging Face repository using hf_hub_download.
 
     No Hugging Face authentication token is required because the repository is public.
+    Downloads are attempted up to ``max_retries`` times with a timeout of
+    ``HF_DOWNLOAD_TIMEOUT_SECONDS`` seconds to prevent indefinite hangs on
+    Streamlit Cloud where idle worker processes can be killed mid-download.
 
     Parameters
     ----------
@@ -142,6 +167,8 @@ def download_dataset_from_hf(
     local_dir:
         Target directory where the file should be saved. If None, saves to the Hugging Face
         default hub cache.
+    max_retries:
+        Number of additional attempts after the first failure (default: 2).
 
     Returns
     -------
@@ -151,35 +178,63 @@ def download_dataset_from_hf(
     Raises
     ------
     RuntimeError
-        If the file cannot be retrieved from Hugging Face.
+        If the file cannot be retrieved from Hugging Face after all retries.
     """
     try:
         from huggingface_hub import hf_hub_download
-
-        logger.info(
-            "Downloading '%s' from public Hugging Face repository '%s'...",
-            filename,
-            repo_id,
-        )
-        downloaded = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            repo_type="dataset",
-            local_dir=str(local_dir) if local_dir is not None else None,
-            token=None,  # Public repository — no authentication token required
-        )
-        return Path(downloaded)
-    except Exception as exc:
-        logger.error(
-            "Failed to download '%s' from Hugging Face repository '%s': %s",
-            filename,
-            repo_id,
-            exc,
-            exc_info=True,
-        )
+    except ImportError as exc:
         raise RuntimeError(
-            f"Could not download dataset '{filename}' from Hugging Face repository '{repo_id}': {exc}"
+            "huggingface_hub is not installed. Add 'huggingface_hub>=0.20,<1.0' to requirements.txt."
         ) from exc
+
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 2):
+        try:
+            logger.info(
+                "Downloading '%s' from public Hugging Face repository '%s' (attempt %d/%d)...",
+                filename,
+                repo_id,
+                attempt,
+                max_retries + 1,
+            )
+            downloaded = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                repo_type="dataset",
+                local_dir=str(local_dir) if local_dir is not None else None,
+                token=None,  # Public repository — no authentication token required
+            )
+            path = Path(downloaded)
+            logger.info(
+                "Successfully downloaded '%s' to '%s' on attempt %d.",
+                filename,
+                path,
+                attempt,
+            )
+            return path
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "Attempt %d/%d failed to download '%s' from '%s': %s",
+                attempt,
+                max_retries + 1,
+                filename,
+                repo_id,
+                exc,
+            )
+
+    logger.error(
+        "All %d download attempts failed for '%s' from '%s': %s",
+        max_retries + 1,
+        filename,
+        repo_id,
+        last_exc,
+        exc_info=True,
+    )
+    raise RuntimeError(
+        f"Could not download dataset '{filename}' from Hugging Face repository '{repo_id}' "
+        f"after {max_retries + 1} attempts: {last_exc}"
+    ) from last_exc
 
 
 def get_dataset_path(
